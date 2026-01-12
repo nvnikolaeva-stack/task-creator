@@ -42,11 +42,6 @@ export function setupSpeechRecognition(
     } else if (event.error === 'not-allowed') {
       errorMessage = 'Доступ к микрофону запрещен. Разрешите доступ в настройках браузера.';
     }
-    console.error('Ошибка распознавания речи:', {
-      error: event.error,
-      message: errorMessage,
-      event: event,
-    });
     onError(errorMessage);
   };
   
