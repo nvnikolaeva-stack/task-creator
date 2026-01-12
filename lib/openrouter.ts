@@ -1,5 +1,9 @@
-// Работа с OpenRouter API через серверный route
+// Работа с OpenRouter API
+// На сервере: прямой вызов к OpenRouter API
+// На клиенте: через API route /api/openrouter
 
+const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const MODEL = 'xiaomi/mimo-v2-flash:free';
 const API_ROUTE = '/api/openrouter';
 
 const SYSTEM_PROMPT = `Ты — помощник по созданию задач для Jira. Твоя задача — преобразовать описание от пользователя в структурированную задачу по шаблону.
@@ -50,21 +54,49 @@ ${teamsList}
 Если команда не определена однозначно, верни null для обоих полей.`;
 
   try {
-    console.log('Запрос к серверному API (detectTeam)');
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    const isServer = typeof window === 'undefined' && apiKey;
 
-    const response = await fetch(API_ROUTE, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        action: 'detectTeam',
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: prompt },
-        ],
-      }),
-    });
+    let response: Response;
+
+    if (isServer) {
+      // Прямой вызов OpenRouter API на сервере
+      console.log('Запрос к OpenRouter API напрямую (detectTeam)');
+      
+      response = await fetch(OPENROUTER_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+          'HTTP-Referer': process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000',
+          'X-Title': 'Jira Task Creator',
+        },
+        body: JSON.stringify({
+          model: MODEL,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: prompt },
+          ],
+        }),
+      });
+    } else {
+      // Через API route на клиенте
+      console.log('Запрос к серверному API route (detectTeam)');
+      
+      response = await fetch(API_ROUTE, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'detectTeam',
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: prompt },
+          ],
+        }),
+      });
+    }
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({ error: 'Не удалось прочитать ответ' }));
@@ -142,21 +174,49 @@ ${template}
 - Если информации достаточно, верни sufficient: true и пустой массив questions`;
 
   try {
-    console.log('Запрос к серверному API (checkInformationAndAskQuestions)');
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    const isServer = typeof window === 'undefined' && apiKey;
 
-    const response = await fetch(API_ROUTE, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        action: 'checkInformationAndAskQuestions',
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: prompt },
-        ],
-      }),
-    });
+    let response: Response;
+
+    if (isServer) {
+      // Прямой вызов OpenRouter API на сервере
+      console.log('Запрос к OpenRouter API напрямую (checkInformationAndAskQuestions)');
+      
+      response = await fetch(OPENROUTER_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+          'HTTP-Referer': process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000',
+          'X-Title': 'Jira Task Creator',
+        },
+        body: JSON.stringify({
+          model: MODEL,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: prompt },
+          ],
+        }),
+      });
+    } else {
+      // Через API route на клиенте
+      console.log('Запрос к серверному API route (checkInformationAndAskQuestions)');
+      
+      response = await fetch(API_ROUTE, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'checkInformationAndAskQuestions',
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: prompt },
+          ],
+        }),
+      });
+    }
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({ error: 'Не удалось прочитать ответ' }));
@@ -229,21 +289,49 @@ ${template}
 Заполни шаблон, используя информацию из описания. Если какой-то информации нет, оставь плейсхолдер [уточнить: что именно].`;
 
   try {
-    console.log('Запрос к серверному API (generateTask)');
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    const isServer = typeof window === 'undefined' && apiKey;
 
-    const response = await fetch(API_ROUTE, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        action: 'generateTask',
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: prompt },
-        ],
-      }),
-    });
+    let response: Response;
+
+    if (isServer) {
+      // Прямой вызов OpenRouter API на сервере
+      console.log('Запрос к OpenRouter API напрямую (generateTask)');
+      
+      response = await fetch(OPENROUTER_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+          'HTTP-Referer': process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000',
+          'X-Title': 'Jira Task Creator',
+        },
+        body: JSON.stringify({
+          model: MODEL,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: prompt },
+          ],
+        }),
+      });
+    } else {
+      // Через API route на клиенте
+      console.log('Запрос к серверному API route (generateTask)');
+      
+      response = await fetch(API_ROUTE, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'generateTask',
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: prompt },
+          ],
+        }),
+      });
+    }
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({ error: 'Не удалось прочитать ответ' }));
