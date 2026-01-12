@@ -192,6 +192,46 @@ async function postProcessTranscription(rawText: string): Promise<{ correctedTex
   }
 }
 
+// Парсинг ответов из одного сообщения (для голосового режима)
+function parseAnswersFromText(text: string, questionCount: number): string[] {
+  const answers: string[] = [];
+  
+  // Пробуем разбить по номерам "1.", "2." и т.д.
+  const parts = text.split(/\d+[\.\)]\s*/);
+  
+  if (parts.length > 1) {
+    // Убираем пустой первый элемент
+    for (let i = 1; i < parts.length && answers.length < questionCount; i++) {
+      const answer = parts[i].trim();
+      answers.push(normalizeAnswer(answer));
+    }
+  } else {
+    // Пробуем разбить по переносам строк
+    const lines = text.split('\n').filter(l => l.trim());
+    for (const line of lines) {
+      if (answers.length < questionCount) {
+        answers.push(normalizeAnswer(line.trim()));
+      }
+    }
+  }
+  
+  // Дополняем недостающие ответы
+  while (answers.length < questionCount) {
+    answers.push('[не указано]');
+  }
+  
+  return answers;
+}
+
+// Нормализация ответа (обработка "не знаю" и т.д.)
+function normalizeAnswer(answer: string): string {
+  const skipPhrases = ['не знаю', 'незнаю', '-', 'пропустить', 'skip', 'нет', 'хз', 'без понятия'];
+  if (skipPhrases.some(phrase => answer.toLowerCase().includes(phrase))) {
+    return '[не указано]';
+  }
+  return answer;
+}
+
 // Обработка текстового сообщения
 export async function handleTextMessage(
   text: string,
@@ -200,6 +240,8 @@ export async function handleTextMessage(
   userState: Map<number, any>
 ): Promise<void> {
   const state = userState.get(chatId) || {};
+  state.isVoiceInput = false; // Текстовый режим
+  userState.set(chatId, state);
 
   // Если ожидается ответ на вопрос о команде
   if (state.waitingForTeam) {
@@ -225,10 +267,33 @@ export async function handleTextMessage(
     return;
   }
 
-  // Если ожидается ответ на уточняющий вопрос
+  // Если ожидается ответ на все вопросы (голосовой режим)
+  if (state.waitingForAllAnswers) {
+    // Парсим ответы из одного сообщения
+    const answers = parseAnswersFromText(text, state.questions.length);
+    state.answers = answers;
+    state.waitingForAllAnswers = false;
+    userState.set(chatId, state);
+    
+    const allAnswers = answers.join('\n\n');
+    await generateAndSendTask(state.userText, state.selectedTeam, allAnswers, chatId, bot, userState);
+    return;
+  }
+
+  // Если ожидается ответ на уточняющий вопрос (текстовый режим)
   if (state.waitingForAnswer && state.currentQuestionIndex !== undefined) {
     const answers = state.answers || [];
-    answers[state.currentQuestionIndex] = text;
+    
+    // Проверяем на "не знаю", "незнаю", "-", "пропустить"
+    const skipPhrases = ['не знаю', 'незнаю', '-', 'пропустить', 'skip', 'пропуск', 'нет ответа'];
+    const isSkip = skipPhrases.some(phrase => text.toLowerCase().trim() === phrase);
+    
+    if (isSkip) {
+      answers[state.currentQuestionIndex] = '[не указано]';
+    } else {
+      answers[state.currentQuestionIndex] = text;
+    }
+    
     state.answers = answers;
     state.currentQuestionIndex++;
 
@@ -236,7 +301,14 @@ export async function handleTextMessage(
       // Следующий вопрос
       await bot.sendMessage(
         chatId,
-        `Вопрос ${state.currentQuestionIndex + 1} из ${state.questions.length}:\n\n${state.questions[state.currentQuestionIndex]}`
+        `Вопрос ${state.currentQuestionIndex + 1} из ${state.questions.length}:\n\n${state.questions[state.currentQuestionIndex]}`,
+        {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '⏭ Пропустить', callback_data: 'skip_question' }
+            ]]
+          }
+        }
       );
       userState.set(chatId, state);
     } else {
@@ -302,6 +374,28 @@ export async function handleVoiceMessage(
   botToken: string
 ): Promise<void> {
   try {
+    let state = userState.get(chatId) || {};
+    
+    // Если ожидается ответ на все вопросы (голосовой режим)
+    if (state.waitingForAllAnswers) {
+      await bot.sendMessage(chatId, '🎤 Распознаю ответы...');
+      
+      const rawText = await transcribeVoice(fileId, bot, botToken);
+      
+      if (!rawText || rawText.trim().length === 0) {
+        await bot.sendMessage(chatId, '❌ Не удалось распознать речь. Попробуйте говорить чётче или отправьте текстом.');
+        return;
+      }
+      
+      // Постобработка через LLM
+      await bot.sendMessage(chatId, '🔄 Обрабатываю...');
+      const { correctedText } = await postProcessTranscription(rawText);
+      
+      // Обрабатываем как текстовое сообщение
+      await handleTextMessage(correctedText, chatId, bot, userState);
+      return;
+    }
+    
     await bot.sendMessage(chatId, '🎤 Распознаю голос...');
     
     // Транскрибируем
@@ -339,7 +433,8 @@ export async function handleVoiceMessage(
       
       const team = teamMapping[detectedTeam.toLowerCase()];
       if (team) {
-        const state = userState.get(chatId) || {};
+        state = userState.get(chatId) || {};
+        state.isVoiceInput = true;
         state.selectedTeam = team;
         state.userText = correctedText;
         userState.set(chatId, state);
@@ -351,7 +446,8 @@ export async function handleVoiceMessage(
     // Пробуем определить команду из текста
     const teamFromText = detectTeamFromText(correctedText);
     if (teamFromText) {
-      const state = userState.get(chatId) || {};
+      state = userState.get(chatId) || {};
+      state.isVoiceInput = true;
       state.selectedTeam = teamFromText;
       state.userText = correctedText;
       userState.set(chatId, state);
@@ -374,7 +470,7 @@ export async function handleVoiceMessage(
       }
     );
     
-    const state = userState.get(chatId) || {};
+    state = userState.get(chatId) || {};
     state.userText = correctedText;
     state.waitingForTeam = true;
     userState.set(chatId, state);
@@ -420,18 +516,55 @@ export async function processTask(
     if (!checkResult.sufficient && checkResult.questions && checkResult.questions.length > 0) {
       // Нужны уточняющие вопросы
       const state = userState.get(chatId) || {};
-      state.waitingForAnswer = true;
-      state.currentQuestionIndex = 0;
-      state.questions = checkResult.questions;
-      state.answers = [];
-      state.userText = text;
-      state.selectedTeam = team;
-      userState.set(chatId, state);
+      
+      // Определяем режим ввода (голос или текст)
+      const isVoiceMode = state.isVoiceInput === true;
+      
+      if (isVoiceMode) {
+        // Голосовой режим — все вопросы сразу
+        const questionsList = checkResult.questions
+          .map((q, i) => `${i + 1}. ${q}`)
+          .join('\n');
+        
+        await bot.sendMessage(
+          chatId,
+          `📝 Нужны уточнения (${checkResult.questions.length} вопросов):\n\n${questionsList}\n\n🎤 Запишите голосовое сообщение с ответами на все вопросы по порядку.\n\nИли напишите "не знаю" / "-" для пунктов, которые неизвестны.`,
+          {
+            reply_markup: {
+              inline_keyboard: [[
+                { text: '⏭ Пропустить все вопросы', callback_data: 'skip_all_questions' }
+              ]]
+            }
+          }
+        );
+        
+        state.waitingForAllAnswers = true;
+        state.questions = checkResult.questions;
+        state.userText = text;
+        state.selectedTeam = team;
+        userState.set(chatId, state);
+      } else {
+        // Текстовый режим — по одному вопросу
+        state.waitingForAnswer = true;
+        state.currentQuestionIndex = 0;
+        state.questions = checkResult.questions;
+        state.answers = [];
+        state.userText = text;
+        state.selectedTeam = team;
+        userState.set(chatId, state);
 
-      await bot.sendMessage(
-        chatId,
-        `Нужны уточнения (${checkResult.questions.length} вопросов):\n\nВопрос 1 из ${checkResult.questions.length}:\n\n${checkResult.questions[0]}`
-      );
+        await bot.sendMessage(
+          chatId,
+          `Нужны уточнения (${checkResult.questions.length} вопросов):\n\nВопрос 1 из ${checkResult.questions.length}:\n\n${checkResult.questions[0]}`,
+          {
+            reply_markup: {
+              inline_keyboard: [[
+                { text: '⏭ Пропустить', callback_data: 'skip_question' }
+              ]]
+            }
+          }
+        );
+      }
     } else {
       // Информации достаточно
       await generateAndSendTask(text, team, undefined, chatId, bot, userState);
@@ -587,6 +720,44 @@ export function handleBotCommands(bot: TelegramBot, userState: Map<number, any>)
       }
       
       await bot.answerCallbackQuery(query.id);
+    } else if (query.data === 'skip_question') {
+      // Пропустить текущий вопрос (текстовый режим)
+      const state = userState.get(chatId) || {};
+      if (state.waitingForAnswer && state.currentQuestionIndex !== undefined) {
+        const answers = state.answers || [];
+        answers[state.currentQuestionIndex] = '[не указано]';
+        state.answers = answers;
+        state.currentQuestionIndex++;
+        
+        if (state.currentQuestionIndex < state.questions.length) {
+          await bot.sendMessage(
+            chatId,
+            `Вопрос ${state.currentQuestionIndex + 1} из ${state.questions.length}:\n\n${state.questions[state.currentQuestionIndex]}`,
+            {
+              reply_markup: {
+                inline_keyboard: [[
+                  { text: '⏭ Пропустить', callback_data: 'skip_question' }
+                ]]
+              }
+            }
+          );
+        } else {
+          state.waitingForAnswer = false;
+          const allAnswers = answers.join('\n\n');
+          await generateAndSendTask(state.userText, state.selectedTeam, allAnswers, chatId, bot, userState);
+        }
+        userState.set(chatId, state);
+      }
+      await bot.answerCallbackQuery(query.id);
+      return;
+    } else if (query.data === 'skip_all_questions') {
+      // Пропустить все вопросы (голосовой режим)
+      const state = userState.get(chatId) || {};
+      state.waitingForAllAnswers = false;
+      const answers = state.questions.map(() => '[не указано]');
+      await generateAndSendTask(state.userText, state.selectedTeam, answers.join('\n\n'), chatId, bot, userState);
+      await bot.answerCallbackQuery(query.id);
+      return;
     } else if (query.data?.startsWith('copy_')) {
       await bot.answerCallbackQuery(query.id, { text: 'Задача скопирована в буфер обмена!' });
     }
