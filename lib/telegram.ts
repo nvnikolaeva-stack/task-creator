@@ -10,52 +10,53 @@ export function detectTeamFromText(text: string): SelectedTeam | null {
   
   const keywords: Array<{ patterns: string[]; team: SelectedTeam }> = [
     {
-      patterns: ['технический рисерч', 'тех рисерч'],
+      patterns: ['технический рисерч', 'тех рисерч', 'техрисерч'],
       team: { teamId: 'development', subtypeId: 'tech_research' }
     },
     {
-      patterns: ['разработка', 'разраб', 'таска', 'задача на разработку', 'задача разработка'],
+      patterns: ['разработка', 'разраб', 'разрабы', 'разработку', 'таска', 'задача на разработку', 'задача разработка', 'девелопмент', 'бэкенд', 'фронтенд', 'backend', 'frontend'],
       team: { teamId: 'development', subtypeId: 'task' }
     },
     {
-      patterns: ['выгрузка'],
+      patterns: ['выгрузка', 'выгрузку'],
       team: { teamId: 'analytics', subtypeId: 'export' }
     },
     {
-      patterns: ['дашборд'],
+      patterns: ['дашборд', 'дашборда', 'dashboard'],
       team: { teamId: 'analytics', subtypeId: 'dashboard' }
     },
     {
-      patterns: ['аб тест', 'аб-тест', 'ab тест'],
+      patterns: ['аб тест', 'аб-тест', 'ab тест', 'ab-тест', 'сплит тест'],
       team: { teamId: 'analytics', subtypeId: 'ab_design' }
     },
     {
-      patterns: ['аналитика', 'аналитик'],
+      patterns: ['аналитика', 'аналитик', 'аналитику', 'аналитике', 'рисерч', 'исследование данных'],
       team: { teamId: 'analytics', subtypeId: 'research' }
     },
     {
-      patterns: ['дизайн', 'макет', 'дизайнер'],
+      patterns: ['дизайн', 'дизайну', 'дизайнер', 'дизайнеру', 'макет', 'макеты', 'дизу'],
       team: { teamId: 'design' }
     },
     {
-      patterns: ['эксперт', 'экспертам'],
+      patterns: ['эксперт', 'экспертам', 'эксперту', 'экспертов', 'экспертная'],
       team: { teamId: 'experts' }
     },
     {
-      patterns: ['юкс', 'ux', 'исследование'],
+      patterns: ['юкс', 'ux', 'юх', 'ю экс', 'исследование пользователей', 'пользовательское исследование', 'usability'],
       team: { teamId: 'ux' }
     },
     {
-      patterns: ['поиск'],
+      patterns: ['поиск', 'поиску', 'поиске', 'серч', 'search'],
       team: { teamId: 'search' }
     },
     {
-      patterns: ['рекомендации', 'рекомендашки'],
+      patterns: ['рекомендации', 'рекомендашки', 'рекам', 'рекомендациям', 'recommendations'],
       team: { teamId: 'recommendations' }
     },
   ];
 
-  const firstPart = lowerText.substring(0, 100);
+  // Проверяем первые 150 символов
+  const firstPart = lowerText.substring(0, 150);
   
   for (const { patterns, team } of keywords) {
     for (const pattern of patterns) {
@@ -71,34 +72,28 @@ export function detectTeamFromText(text: string): SelectedTeam | null {
 // Транскрибация голосового сообщения через Groq Whisper API
 async function transcribeVoice(fileId: string, bot: TelegramBot, botToken: string): Promise<string> {
   console.log('=== Начало транскрибации ===');
-  console.log('fileId:', fileId);
   
-  // Получаем файл от Telegram
   const file = await bot.getFile(fileId);
   const fileUrl = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
-  console.log('fileUrl:', fileUrl);
   
-  // Скачиваем аудио
   const audioResponse = await fetch(fileUrl);
   if (!audioResponse.ok) {
     throw new Error('Не удалось скачать аудио файл');
   }
   
   const audioBuffer = await audioResponse.arrayBuffer();
-  console.log('Размер аудио:', audioBuffer.byteLength);
   
-  // Отправляем в Groq Whisper API
   const groqKey = process.env.GROQ_API_KEY;
   if (!groqKey) {
-    throw new Error('GROQ_API_KEY не настроен. Добавьте ключ в переменные окружения.');
+    throw new Error('GROQ_API_KEY не настроен');
   }
   
   const formData = new FormData();
   formData.append('file', new Blob([audioBuffer], { type: 'audio/ogg' }), 'voice.ogg');
-  formData.append('model', 'whisper-large-v3');
+  formData.append('model', 'whisper-large-v3-turbo');
   formData.append('language', 'ru');
-  
-  console.log('Отправляю в Groq Whisper...');
+  // Подсказка с ключевыми словами для лучшего распознавания
+  formData.append('prompt', 'Задача на разработку, дизайн, аналитика, эксперты, UX, поиск, рекомендации. Таска, выгрузка, дашборд, АБ-тест, рисерч, бэкенд, фронтенд, iOS, Android, продавцы, покупатели, Авито, категория.');
   
   const whisperResponse = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
     method: 'POST',
@@ -110,14 +105,91 @@ async function transcribeVoice(fileId: string, bot: TelegramBot, botToken: strin
   
   if (!whisperResponse.ok) {
     const errorText = await whisperResponse.text();
-    console.error('Ошибка Whisper API:', whisperResponse.status, errorText);
-    throw new Error(`Ошибка распознавания речи: ${whisperResponse.status}`);
+    console.error('Ошибка Whisper:', errorText);
+    throw new Error('Ошибка распознавания речи');
   }
   
   const result = await whisperResponse.json();
-  console.log('Результат транскрибации:', result.text);
+  console.log('Сырой результат Whisper:', result.text);
   
   return result.text;
+}
+
+// Постобработка транскрибации через LLM для исправления ошибок и определения команды
+async function postProcessTranscription(rawText: string): Promise<{ correctedText: string; detectedTeam: string | null }> {
+  console.log('=== Постобработка текста через LLM ===');
+  
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    return { correctedText: rawText, detectedTeam: null };
+  }
+  
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'HTTP-Referer': 'https://task-creator.vercel.app',
+        'X-Title': 'Task Creator Bot',
+      },
+      body: JSON.stringify({
+        model: 'anthropic/claude-sonnet-4',
+        messages: [{
+          role: 'user',
+          content: `Ты помощник для исправления ошибок распознавания речи.
+
+Исходный текст (распознанная речь): "${rawText}"
+
+Задачи:
+1. Исправь очевидные ошибки распознавания
+2. Определи команду, на которую ставится задача
+
+Возможные команды:
+- разработка (синонимы: разраб, разрабы, девелопмент, таска)
+- дизайн (синонимы: дизу, дизайнер, макет)
+- аналитика (синонимы: аналитик, аналитику, данные)
+- эксперты (синонимы: экспертам, эксперту)
+- ux (синонимы: юкс, исследование, ресерч пользователей)
+- поиск (синонимы: поиску, серч)
+- рекомендации (синонимы: рекомендашки, рекам)
+
+Ответь ТОЛЬКО в формате JSON:
+{
+  "correctedText": "исправленный текст",
+  "detectedTeam": "id команды или null"
+}
+
+Без дополнительных пояснений, только JSON.`
+        }],
+        max_tokens: 1000,
+      }),
+    });
+    
+    if (!response.ok) {
+      console.error('Ошибка LLM постобработки');
+      return { correctedText: rawText, detectedTeam: null };
+    }
+    
+    const data = await response.json();
+    const content = data.choices[0]?.message?.content || '';
+    
+    // Парсим JSON из ответа
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const result = JSON.parse(jsonMatch[0]);
+      console.log('Результат постобработки:', result);
+      return {
+        correctedText: result.correctedText || rawText,
+        detectedTeam: result.detectedTeam || null,
+      };
+    }
+    
+    return { correctedText: rawText, detectedTeam: null };
+  } catch (error) {
+    console.error('Ошибка постобработки:', error);
+    return { correctedText: rawText, detectedTeam: null };
+  }
 }
 
 // Обработка текстового сообщения
@@ -230,23 +302,89 @@ export async function handleVoiceMessage(
   botToken: string
 ): Promise<void> {
   try {
-    await bot.sendMessage(chatId, '🎤 Обрабатываю голосовое сообщение...');
+    await bot.sendMessage(chatId, '🎤 Распознаю голос...');
     
-    // Транскрибируем голос
-    const transcribedText = await transcribeVoice(fileId, bot, botToken);
+    // Транскрибируем
+    const rawText = await transcribeVoice(fileId, bot, botToken);
     
-    if (!transcribedText) {
-      await bot.sendMessage(chatId, 'Не удалось распознать речь. Попробуйте еще раз.');
+    if (!rawText || rawText.trim().length === 0) {
+      await bot.sendMessage(chatId, '❌ Не удалось распознать речь. Попробуйте говорить чётче или отправьте текстом.');
       return;
     }
-
-    await bot.sendMessage(chatId, `📝 Распознано: "${transcribedText}"`);
     
-    // Обрабатываем как текстовое сообщение
-    await handleTextMessage(transcribedText, chatId, bot, userState);
-  } catch (error) {
-    console.error('Ошибка обработки голосового сообщения:', error);
-    await bot.sendMessage(chatId, 'Произошла ошибка при обработке голосового сообщения. Попробуйте отправить текстом.');
+    // Постобработка через LLM
+    await bot.sendMessage(chatId, '🔄 Обрабатываю...');
+    const { correctedText, detectedTeam } = await postProcessTranscription(rawText);
+    
+    // Показываем распознанный текст
+    await bot.sendMessage(chatId, `📝 Распознано:\n"${correctedText}"`);
+    
+    // Если LLM определил команду — используем её
+    if (detectedTeam) {
+      const teamMapping: Record<string, SelectedTeam> = {
+        'разработка': { teamId: 'development', subtypeId: 'task' },
+        'development': { teamId: 'development', subtypeId: 'task' },
+        'дизайн': { teamId: 'design' },
+        'design': { teamId: 'design' },
+        'аналитика': { teamId: 'analytics', subtypeId: 'research' },
+        'analytics': { teamId: 'analytics', subtypeId: 'research' },
+        'эксперты': { teamId: 'experts' },
+        'experts': { teamId: 'experts' },
+        'ux': { teamId: 'ux' },
+        'поиск': { teamId: 'search' },
+        'search': { teamId: 'search' },
+        'рекомендации': { teamId: 'recommendations' },
+        'recommendations': { teamId: 'recommendations' },
+      };
+      
+      const team = teamMapping[detectedTeam.toLowerCase()];
+      if (team) {
+        const state = userState.get(chatId) || {};
+        state.selectedTeam = team;
+        state.userText = correctedText;
+        userState.set(chatId, state);
+        await processTask(correctedText, team, chatId, bot, userState);
+        return;
+      }
+    }
+    
+    // Пробуем определить команду из текста
+    const teamFromText = detectTeamFromText(correctedText);
+    if (teamFromText) {
+      const state = userState.get(chatId) || {};
+      state.selectedTeam = teamFromText;
+      state.userText = correctedText;
+      userState.set(chatId, state);
+      await processTask(correctedText, teamFromText, chatId, bot, userState);
+      return;
+    }
+    
+    // Команда не определена — просим выбрать вручную
+    const teams = loadTemplates();
+    await bot.sendMessage(
+      chatId,
+      '❓ Не удалось определить команду. Выберите вручную:',
+      {
+        reply_markup: {
+          inline_keyboard: teams.map(team => [{
+            text: team.name,
+            callback_data: `team_${team.id}`
+          }])
+        }
+      }
+    );
+    
+    const state = userState.get(chatId) || {};
+    state.userText = correctedText;
+    state.waitingForTeam = true;
+    userState.set(chatId, state);
+    
+  } catch (error: any) {
+    console.error('Ошибка обработки голоса:', error);
+    await bot.sendMessage(
+      chatId, 
+      `❌ Ошибка: ${error.message || 'Не удалось обработать голосовое сообщение'}\n\nПопробуйте отправить текстом.`
+    );
   }
 }
 
