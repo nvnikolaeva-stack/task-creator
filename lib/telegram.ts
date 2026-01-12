@@ -68,38 +68,56 @@ export function detectTeamFromText(text: string): SelectedTeam | null {
   return null;
 }
 
-// Транскрибация голосового сообщения через OpenRouter (Whisper)
+// Транскрибация голосового сообщения через Groq Whisper API
 async function transcribeVoice(fileId: string, bot: TelegramBot, botToken: string): Promise<string> {
-  try {
-    // Получаем файл
-    const file = await bot.getFile(fileId);
-    const fileUrl = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
-    
-    // Загружаем файл
-    const response = await fetch(fileUrl);
-    if (!response.ok) {
-      throw new Error('Не удалось загрузить файл');
-    }
-    
-    const audioBlob = await response.blob();
-    const formData = new FormData();
-    formData.append('file', audioBlob, 'voice.ogg');
-    formData.append('model', 'whisper-1');
-    
-    // Используем OpenAI API напрямую (через OpenRouter можно использовать chat completion с Whisper)
-    // Альтернатива: использовать наш API route для транскрибации
-    const apiKey = process.env.OPENROUTER_API_KEY;
-    if (!apiKey) {
-      throw new Error('API ключ не настроен');
-    }
-
-    // Простая транскрибация через наш API route (можно улучшить)
-    // Пока возвращаем заглушку - в реальности нужно настроить правильную транскрибацию
-    throw new Error('Транскрибация голоса временно недоступна. Отправьте текст.');
-  } catch (error) {
-    console.error('Ошибка транскрибации голоса:', error);
-    throw error;
+  console.log('=== Начало транскрибации ===');
+  console.log('fileId:', fileId);
+  
+  // Получаем файл от Telegram
+  const file = await bot.getFile(fileId);
+  const fileUrl = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
+  console.log('fileUrl:', fileUrl);
+  
+  // Скачиваем аудио
+  const audioResponse = await fetch(fileUrl);
+  if (!audioResponse.ok) {
+    throw new Error('Не удалось скачать аудио файл');
   }
+  
+  const audioBuffer = await audioResponse.arrayBuffer();
+  console.log('Размер аудио:', audioBuffer.byteLength);
+  
+  // Отправляем в Groq Whisper API
+  const groqKey = process.env.GROQ_API_KEY;
+  if (!groqKey) {
+    throw new Error('GROQ_API_KEY не настроен. Добавьте ключ в переменные окружения.');
+  }
+  
+  const formData = new FormData();
+  formData.append('file', new Blob([audioBuffer], { type: 'audio/ogg' }), 'voice.ogg');
+  formData.append('model', 'whisper-large-v3');
+  formData.append('language', 'ru');
+  
+  console.log('Отправляю в Groq Whisper...');
+  
+  const whisperResponse = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${groqKey}`,
+    },
+    body: formData,
+  });
+  
+  if (!whisperResponse.ok) {
+    const errorText = await whisperResponse.text();
+    console.error('Ошибка Whisper API:', whisperResponse.status, errorText);
+    throw new Error(`Ошибка распознавания речи: ${whisperResponse.status}`);
+  }
+  
+  const result = await whisperResponse.json();
+  console.log('Результат транскрибации:', result.text);
+  
+  return result.text;
 }
 
 // Обработка текстового сообщения
