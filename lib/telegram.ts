@@ -116,6 +116,8 @@ async function transcribeVoice(fileId: string, bot: TelegramBot, botToken: strin
 }
 
 // Постобработка транскрибации через LLM для исправления ошибок и определения команды
+// ЗАКОММЕНТИРОВАНО: убрана LLM постобработка, используется только Whisper
+/*
 async function postProcessTranscription(rawText: string): Promise<{ correctedText: string; detectedTeam: string | null }> {
   console.log('=== Постобработка текста через LLM ===');
   
@@ -191,6 +193,7 @@ async function postProcessTranscription(rawText: string): Promise<{ correctedTex
     return { correctedText: rawText, detectedTeam: null };
   }
 }
+*/
 
 // Парсинг ответов из одного сообщения (для голосового режима)
 function parseAnswersFromText(text: string, questionCount: number): string[] {
@@ -380,107 +383,76 @@ export async function handleVoiceMessage(
     if (state.waitingForAllAnswers) {
       await bot.sendMessage(chatId, '🎤 Распознаю ответы...');
       
-      const rawText = await transcribeVoice(fileId, bot, botToken);
+      const transcribedText = await transcribeVoice(fileId, bot, botToken);
       
-      if (!rawText || rawText.trim().length === 0) {
+      if (!transcribedText || transcribedText.trim().length === 0) {
         await bot.sendMessage(chatId, '❌ Не удалось распознать речь. Попробуйте говорить чётче или отправьте текстом.');
         return;
       }
       
-      // Постобработка через LLM
-      await bot.sendMessage(chatId, '🔄 Обрабатываю...');
-      const { correctedText } = await postProcessTranscription(rawText);
-      
-      // Обрабатываем как текстовое сообщение
-      await handleTextMessage(correctedText, chatId, bot, userState);
+      // Обрабатываем как текстовое сообщение БЕЗ постобработки
+      await handleTextMessage(transcribedText, chatId, bot, userState);
       return;
     }
     
     await bot.sendMessage(chatId, '🎤 Распознаю голос...');
     
-    // Транскрибируем
-    const rawText = await transcribeVoice(fileId, bot, botToken);
+    // Транскрибируем через Whisper
+    const transcribedText = await transcribeVoice(fileId, bot, botToken);
     
-    if (!rawText || rawText.trim().length === 0) {
+    if (!transcribedText || transcribedText.trim().length === 0) {
       await bot.sendMessage(chatId, '❌ Не удалось распознать речь. Попробуйте говорить чётче или отправьте текстом.');
       return;
     }
     
-    // Постобработка через LLM
-    await bot.sendMessage(chatId, '🔄 Обрабатываю...');
-    const { correctedText, detectedTeam } = await postProcessTranscription(rawText);
+    // Показываем распознанный текст БЕЗ постобработки
+    await bot.sendMessage(chatId, `📝 Распознано:\n"${transcribedText}"`);
     
-    // Показываем распознанный текст
-    await bot.sendMessage(chatId, `📝 Распознано:\n"${correctedText}"`);
-    
-    // Если LLM определил команду — используем её
-    if (detectedTeam) {
-      const teamMapping: Record<string, SelectedTeam> = {
-        'разработка': { teamId: 'development', subtypeId: 'task' },
-        'development': { teamId: 'development', subtypeId: 'task' },
-        'дизайн': { teamId: 'design' },
-        'design': { teamId: 'design' },
-        'аналитика': { teamId: 'analytics', subtypeId: 'research' },
-        'analytics': { teamId: 'analytics', subtypeId: 'research' },
-        'эксперты': { teamId: 'experts' },
-        'experts': { teamId: 'experts' },
-        'ux': { teamId: 'ux' },
-        'поиск': { teamId: 'search' },
-        'search': { teamId: 'search' },
-        'рекомендации': { teamId: 'recommendations' },
-        'recommendations': { teamId: 'recommendations' },
-      };
-      
-      const team = teamMapping[detectedTeam.toLowerCase()];
-      if (team) {
-        state = userState.get(chatId) || {};
-        state.isVoiceInput = true;
-        state.selectedTeam = team;
-        state.userText = correctedText;
-        userState.set(chatId, state);
-        await processTask(correctedText, team, chatId, bot, userState);
-        return;
-      }
-    }
-    
-    // Пробуем определить команду из текста
-    const teamFromText = detectTeamFromText(correctedText);
-    if (teamFromText) {
-      state = userState.get(chatId) || {};
-      state.isVoiceInput = true;
-      state.selectedTeam = teamFromText;
-      state.userText = correctedText;
-      userState.set(chatId, state);
-      await processTask(correctedText, teamFromText, chatId, bot, userState);
-      return;
-    }
-    
-    // Команда не определена — просим выбрать вручную
-    const teams = loadTemplates();
-    await bot.sendMessage(
-      chatId,
-      '❓ Не удалось определить команду. Выберите вручную:',
-      {
-        reply_markup: {
-          inline_keyboard: teams.map(team => [{
-            text: team.name,
-            callback_data: `team_${team.id}`
-          }])
-        }
-      }
-    );
-    
+    // Устанавливаем флаг голосового ввода
     state = userState.get(chatId) || {};
-    state.userText = correctedText;
-    state.waitingForTeam = true;
+    state.isVoiceInput = true;
+    state.userText = transcribedText;
     userState.set(chatId, state);
+    
+    // Определяем команду из текста напрямую
+    let detectedTeam = detectTeamFromText(transcribedText);
+    
+    if (!detectedTeam) {
+      // Пробуем через LLM только для определения команды
+      try {
+        const teams = loadTemplates();
+        detectedTeam = await detectTeam(transcribedText, teams);
+      } catch (error) {
+        console.error('Ошибка определения команды:', error);
+      }
+    }
+    
+    if (detectedTeam) {
+      state.selectedTeam = detectedTeam;
+      userState.set(chatId, state);
+      await processTask(transcribedText, detectedTeam, chatId, bot, userState);
+    } else {
+      // Команда не определена — показываем кнопки выбора
+      const teams = loadTemplates();
+      await bot.sendMessage(
+        chatId,
+        '❓ Не удалось определить команду. Выберите:',
+        {
+          reply_markup: {
+            inline_keyboard: teams.map(team => [{
+              text: team.name,
+              callback_data: `team_${team.id}`
+            }])
+          }
+        }
+      );
+      state.waitingForTeam = true;
+      userState.set(chatId, state);
+    }
     
   } catch (error: any) {
     console.error('Ошибка обработки голоса:', error);
-    await bot.sendMessage(
-      chatId, 
-      `❌ Ошибка: ${error.message || 'Не удалось обработать голосовое сообщение'}\n\nПопробуйте отправить текстом.`
-    );
+    await bot.sendMessage(chatId, `❌ Ошибка: ${error.message}\n\nПопробуйте отправить текстом.`);
   }
 }
 
