@@ -279,6 +279,10 @@ export default function Home() {
     setError('');
   };
 
+  const handleNewTask = () => {
+    reset();
+  };
+
   const getTeamDisplayName = (team: SelectedTeam | null): string => {
     if (!team) return '';
     const teamObj = teams.find(t => t.id === team.teamId);
@@ -447,6 +451,7 @@ export default function Home() {
                 saveTaskToHistory(updatedTask, teamName, subtypeName);
               }
             }}
+            onNewTask={handleNewTask}
           />
           <button
             onClick={reset}

@@ -350,9 +350,10 @@ export async function handleTextMessage(
         `Вопрос ${state.currentQuestionIndex + 1} из ${state.questions.length}:\n\n${state.questions[state.currentQuestionIndex]}`,
         {
           reply_markup: {
-            inline_keyboard: [[
-              { text: '⏭ Пропустить', callback_data: 'skip_question' }
-            ]]
+            inline_keyboard: [
+              [{ text: '⏭ Пропустить', callback_data: 'skip_question' }],
+              [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
+            ]
           }
         }
       );
@@ -420,27 +421,11 @@ export async function handleVoiceMessage(
   botToken: string
 ): Promise<void> {
   try {
-    let state = userState.get(chatId) || {};
-    
-    // Если ожидается ответ на все вопросы (голосовой режим)
-    if (state.waitingForAllAnswers) {
-      await bot.sendMessage(chatId, '🎤 Распознаю ответы...');
-      
-      const transcribedText = await transcribeVoice(fileId, bot, botToken);
-      
-      if (!transcribedText || transcribedText.trim().length === 0) {
-        await bot.sendMessage(chatId, '❌ Не удалось распознать речь. Попробуйте говорить чётче или отправьте текстом.');
-        return;
-      }
-      
-      // Обрабатываем как текстовое сообщение БЕЗ постобработки
-      await handleTextMessage(transcribedText, chatId, bot, userState);
-      return;
-    }
+    const state = userState.get(chatId) || {};
     
     await bot.sendMessage(chatId, '🎤 Распознаю голос...');
     
-    // Транскрибируем через Deepgram
+    // Транскрибируем
     const transcribedText = await transcribeVoice(fileId, bot, botToken);
     
     if (!transcribedText || transcribedText.trim().length === 0) {
@@ -448,11 +433,30 @@ export async function handleVoiceMessage(
       return;
     }
     
-    // Проверяем, ожидается ли редактирование
-    state = userState.get(chatId) || {};
+    await bot.sendMessage(chatId, `📝 Распознано:\n"${transcribedText}"`);
     
+    // ВАЖНО: Сначала проверяем, ожидаются ли ответы на вопросы
+    if (state.waitingForAllAnswers && state.questions && state.userText && state.selectedTeam) {
+      // Это ответы на уточняющие вопросы — обрабатываем их
+      console.log('Обрабатываю голосовые ответы на вопросы');
+      
+      const answers = parseAnswersFromText(transcribedText, state.questions.length);
+      state.waitingForAllAnswers = false;
+      state.answers = answers;
+      userState.set(chatId, state);
+      
+      const allAnswers = answers
+        .map((answer, i) => `${state.questions[i]}: ${answer}`)
+        .join('\n\n');
+      
+      await bot.sendMessage(chatId, '⏳ Генерирую задачу с учётом ответов...');
+      await generateAndSendTask(state.userText, state.selectedTeam, allAnswers, chatId, bot, userState);
+      return;
+    }
+    
+    // Проверяем, ожидается ли редактирование
     if (state.waitingForEdit && state.lastGeneratedTask) {
-      await bot.sendMessage(chatId, `📝 Распознано: "${transcribedText}"\n\n✏️ Редактирую задачу...`);
+      await bot.sendMessage(chatId, '✏️ Редактирую задачу...');
       
       try {
         const { editTask } = await import('./openrouter');
@@ -482,6 +486,9 @@ export async function handleVoiceMessage(
               [
                 { text: '📋 Скопировать', callback_data: 'copy_task' },
                 { text: '✏️ Редактировать', callback_data: 'edit_task' }
+              ],
+              [
+                { text: '🆕 Новая задача', callback_data: 'new_task' }
               ]
             ]
           }
@@ -493,19 +500,15 @@ export async function handleVoiceMessage(
       return;
     }
     
-    // Показываем распознанный текст БЕЗ постобработки
-    await bot.sendMessage(chatId, `📝 Распознано:\n"${transcribedText}"`);
-    
-    // Устанавливаем флаг голосового ввода
+    // Это новая задача — обрабатываем как обычно
     state.isVoiceInput = true;
     state.userText = transcribedText;
     userState.set(chatId, state);
     
-    // Определяем команду из текста напрямую
+    // Определяем команду
     let detectedTeam = detectTeamFromText(transcribedText);
     
     if (!detectedTeam) {
-      // Пробуем через LLM только для определения команды
       try {
         const teams = loadTemplates();
         detectedTeam = await detectTeam(transcribedText, teams);
@@ -519,17 +522,19 @@ export async function handleVoiceMessage(
       userState.set(chatId, state);
       await processTask(transcribedText, detectedTeam, chatId, bot, userState);
     } else {
-      // Команда не определена — показываем кнопки выбора
       const teams = loadTemplates();
       await bot.sendMessage(
         chatId,
         '❓ Не удалось определить команду. Выберите:',
         {
           reply_markup: {
-            inline_keyboard: teams.map(team => [{
-              text: team.name,
-              callback_data: `team_${team.id}`
-            }])
+            inline_keyboard: [
+              ...teams.map(team => [{
+                text: team.name,
+                callback_data: `team_${team.id}`
+              }]),
+              [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
+            ]
           }
         }
       );
@@ -590,9 +595,10 @@ export async function processTask(
           `📝 Нужны уточнения (${checkResult.questions.length} вопросов):\n\n${questionsList}\n\n🎤 Запишите голосовое сообщение с ответами на все вопросы по порядку.\n\nИли напишите "не знаю" / "-" для пунктов, которые неизвестны.`,
           {
             reply_markup: {
-              inline_keyboard: [[
-                { text: '⏭ Пропустить все вопросы', callback_data: 'skip_all_questions' }
-              ]]
+              inline_keyboard: [
+                [{ text: '⏭ Пропустить все вопросы', callback_data: 'skip_all_questions' }],
+                [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
+              ]
             }
           }
         );
@@ -617,9 +623,10 @@ export async function processTask(
           `Нужны уточнения (${checkResult.questions.length} вопросов):\n\nВопрос 1 из ${checkResult.questions.length}:\n\n${checkResult.questions[0]}`,
           {
             reply_markup: {
-              inline_keyboard: [[
-                { text: '⏭ Пропустить', callback_data: 'skip_question' }
-              ]]
+              inline_keyboard: [
+                [{ text: '⏭ Пропустить', callback_data: 'skip_question' }],
+                [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
+              ]
             }
           }
         );
@@ -682,6 +689,9 @@ async function generateAndSendTask(
           [
             { text: '📋 Скопировать', callback_data: 'copy_task' },
             { text: '✏️ Редактировать', callback_data: 'edit_task' }
+          ],
+          [
+            { text: '🆕 Новая задача', callback_data: 'new_task' }
           ]
         ]
       }
@@ -739,6 +749,17 @@ export function handleBotCommands(bot: TelegramBot, userState: Map<number, any>)
     }).join('\n\n');
     
     await bot.sendMessage(chatId, `📋 Доступные команды:\n\n${teamsList}`);
+  });
+
+  // Команда /new
+  bot.onText(/\/new/, async (msg) => {
+    const chatId = msg.chat.id;
+    userState.delete(chatId);
+    
+    await bot.sendMessage(
+      chatId,
+      '🆕 Начинаем новую задачу!\n\nОтправьте описание задачи голосом или текстом.',
+    );
   });
 
   // Команда /history
@@ -804,9 +825,10 @@ export function handleBotCommands(bot: TelegramBot, userState: Map<number, any>)
             `Вопрос ${state.currentQuestionIndex + 1} из ${state.questions.length}:\n\n${state.questions[state.currentQuestionIndex]}`,
             {
               reply_markup: {
-                inline_keyboard: [[
-                  { text: '⏭ Пропустить', callback_data: 'skip_question' }
-                ]]
+                inline_keyboard: [
+                  [{ text: '⏭ Пропустить', callback_data: 'skip_question' }],
+                  [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
+                ]
               }
             }
           );
@@ -852,6 +874,29 @@ export function handleBotCommands(bot: TelegramBot, userState: Map<number, any>)
       state.waitingForEdit = false;
       userState.set(chatId, state);
       await bot.sendMessage(chatId, 'Редактирование отменено.');
+      await bot.answerCallbackQuery(query.id);
+      return;
+    } else if (query.data === 'new_task') {
+      // Полностью очищаем состояние пользователя
+      userState.delete(chatId);
+      
+      await bot.sendMessage(
+        chatId,
+        '🆕 Начинаем новую задачу!\n\nОтправьте описание задачи голосом или текстом.\n\nНачните с названия команды, например:\n"Разработка: нужно добавить..."',
+        {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '📋 Список команд', callback_data: 'show_teams' }
+            ]]
+          }
+        }
+      );
+      await bot.answerCallbackQuery(query.id);
+      return;
+    } else if (query.data === 'show_teams') {
+      const teams = loadTemplates();
+      const teamsList = teams.map(t => `• ${t.name}`).join('\n');
+      await bot.sendMessage(chatId, `📋 Доступные команды:\n\n${teamsList}`);
       await bot.answerCallbackQuery(query.id);
       return;
     }

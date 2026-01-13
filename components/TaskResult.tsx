@@ -9,9 +9,10 @@ interface TaskResultProps {
   onRegenerate?: () => void;
   selectedTeam?: { teamId: string; subtypeId?: string };
   onTaskUpdate?: (updatedTask: string) => void;
+  onNewTask?: () => void;
 }
 
-export default function TaskResult({ task, onCopy, onRegenerate, selectedTeam, onTaskUpdate }: TaskResultProps) {
+export default function TaskResult({ task, onCopy, onRegenerate, selectedTeam, onTaskUpdate, onNewTask }: TaskResultProps) {
   const [copied, setCopied] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState('');
@@ -165,6 +166,16 @@ export default function TaskResult({ task, onCopy, onRegenerate, selectedTeam, o
           >
             ✏️ Редактировать
           </button>
+
+          {onNewTask && (
+            <button
+              onClick={onNewTask}
+              className="px-6 py-3 bg-gray-500 text-white rounded-lg 
+                         font-medium hover:bg-gray-600 transition-colors"
+            >
+              🆕 Новая задача
+            </button>
+          )}
 
           {onRegenerate && (
             <button
