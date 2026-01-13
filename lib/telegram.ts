@@ -244,6 +244,51 @@ export async function handleTextMessage(
   state.isVoiceInput = false; // Текстовый режим
   userState.set(chatId, state);
 
+  // Если ожидается редактирование задачи
+  if (state.waitingForEdit && state.lastGeneratedTask) {
+    await bot.sendMessage(chatId, '✏️ Редактирую задачу...');
+    
+    try {
+      const { editTask } = await import('./openrouter');
+      const result = await editTask(
+        state.lastGeneratedTask,
+        text,
+        state.selectedTeam?.teamId || '',
+        state.selectedTeam?.subtypeId
+      );
+      
+      state.lastGeneratedTask = result.editedTask;
+      state.waitingForEdit = false;
+      
+      // Обновляем команду если изменилась
+      if (result.newTeamId) {
+        state.selectedTeam = {
+          teamId: result.newTeamId,
+          subtypeId: result.newSubtypeId,
+        };
+      }
+      
+      userState.set(chatId, state);
+      
+      // Отправляем обновлённую задачу
+      await bot.sendMessage(chatId, `📋 Обновлённая задача:\n\n\`\`\`\n${result.editedTask}\n\`\`\``, {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '📋 Скопировать', callback_data: 'copy_task' },
+              { text: '✏️ Редактировать', callback_data: 'edit_task' }
+            ]
+          ]
+        }
+      });
+    } catch (error: any) {
+      console.error('Ошибка редактирования:', error);
+      await bot.sendMessage(chatId, `❌ Ошибка: ${error.message}`);
+    }
+    return;
+  }
+
   // Если ожидается ответ на вопрос о команде
   if (state.waitingForTeam) {
     const teams = loadTemplates();
@@ -395,7 +440,7 @@ export async function handleVoiceMessage(
     
     await bot.sendMessage(chatId, '🎤 Распознаю голос...');
     
-    // Транскрибируем через Whisper
+    // Транскрибируем через Deepgram
     const transcribedText = await transcribeVoice(fileId, bot, botToken);
     
     if (!transcribedText || transcribedText.trim().length === 0) {
@@ -403,11 +448,55 @@ export async function handleVoiceMessage(
       return;
     }
     
+    // Проверяем, ожидается ли редактирование
+    state = userState.get(chatId) || {};
+    
+    if (state.waitingForEdit && state.lastGeneratedTask) {
+      await bot.sendMessage(chatId, `📝 Распознано: "${transcribedText}"\n\n✏️ Редактирую задачу...`);
+      
+      try {
+        const { editTask } = await import('./openrouter');
+        const result = await editTask(
+          state.lastGeneratedTask,
+          transcribedText,
+          state.selectedTeam?.teamId || '',
+          state.selectedTeam?.subtypeId
+        );
+        
+        state.lastGeneratedTask = result.editedTask;
+        state.waitingForEdit = false;
+        
+        if (result.newTeamId) {
+          state.selectedTeam = {
+            teamId: result.newTeamId,
+            subtypeId: result.newSubtypeId,
+          };
+        }
+        
+        userState.set(chatId, state);
+        
+        await bot.sendMessage(chatId, `📋 Обновлённая задача:\n\n\`\`\`\n${result.editedTask}\n\`\`\``, {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '📋 Скопировать', callback_data: 'copy_task' },
+                { text: '✏️ Редактировать', callback_data: 'edit_task' }
+              ]
+            ]
+          }
+        });
+      } catch (error: any) {
+        console.error('Ошибка редактирования:', error);
+        await bot.sendMessage(chatId, `❌ Ошибка: ${error.message}`);
+      }
+      return;
+    }
+    
     // Показываем распознанный текст БЕЗ постобработки
     await bot.sendMessage(chatId, `📝 Распознано:\n"${transcribedText}"`);
     
     // Устанавливаем флаг голосового ввода
-    state = userState.get(chatId) || {};
     state.isVoiceInput = true;
     state.userText = transcribedText;
     userState.set(chatId, state);
@@ -579,21 +668,31 @@ async function generateAndSendTask(
       console.log('История не сохранена (серверная часть)');
     }
 
-    // Отправляем задачу
+    // Сохраняем задачу в state для возможности редактирования
+    const state = userState.get(chatId) || {};
+    state.lastGeneratedTask = task;
+    state.selectedTeam = team;
+    userState.set(chatId, state);
+    
+    // Отправляем задачу с кнопками редактирования
     await bot.sendMessage(chatId, `📋 Готовая задача:\n\n\`\`\`\n${task}\n\`\`\``, {
       parse_mode: 'Markdown',
       reply_markup: {
-        inline_keyboard: [[
-          {
-            text: '📋 Скопировать',
-            callback_data: `copy_${Date.now()}`
-          }
-        ]]
+        inline_keyboard: [
+          [
+            { text: '📋 Скопировать', callback_data: 'copy_task' },
+            { text: '✏️ Редактировать', callback_data: 'edit_task' }
+          ]
+        ]
       }
     });
-
-    // Очищаем состояние
-    userState.delete(chatId);
+    
+    // НЕ очищаем state полностью, только флаги вопросов
+    state.waitingForAnswer = false;
+    state.waitingForAllAnswers = false;
+    state.questions = undefined;
+    state.answers = undefined;
+    userState.set(chatId, state);
   } catch (error: any) {
     console.error('Ошибка генерации задачи:', error);
     await bot.sendMessage(chatId, `Ошибка генерации задачи: ${error.message || 'Неизвестная ошибка'}`);
@@ -728,8 +827,33 @@ export function handleBotCommands(bot: TelegramBot, userState: Map<number, any>)
       await generateAndSendTask(state.userText, state.selectedTeam, answers.join('\n\n'), chatId, bot, userState);
       await bot.answerCallbackQuery(query.id);
       return;
-    } else if (query.data?.startsWith('copy_')) {
+    } else if (query.data === 'copy_task' || query.data?.startsWith('copy_')) {
       await bot.answerCallbackQuery(query.id, { text: 'Задача скопирована в буфер обмена!' });
+    } else if (query.data === 'edit_task') {
+      const state = userState.get(chatId) || {};
+      state.waitingForEdit = true;
+      userState.set(chatId, state);
+      
+      await bot.sendMessage(
+        chatId,
+        '✏️ Опишите изменения голосом или текстом.\n\nПримеры:\n• "Добавь в критерии приёмки пункт про тестирование"\n• "Убери раздел про метрики"\n• "Измени платформу на iOS"\n• "Переформулируй проблему короче"\n• "Измени команду на дизайн"',
+        {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '❌ Отмена', callback_data: 'cancel_edit' }
+            ]]
+          }
+        }
+      );
+      await bot.answerCallbackQuery(query.id);
+      return;
+    } else if (query.data === 'cancel_edit') {
+      const state = userState.get(chatId) || {};
+      state.waitingForEdit = false;
+      userState.set(chatId, state);
+      await bot.sendMessage(chatId, 'Редактирование отменено.');
+      await bot.answerCallbackQuery(query.id);
+      return;
     }
   });
 }

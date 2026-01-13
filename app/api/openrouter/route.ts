@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL = 'xiaomi/mimo-v2-flash:free';
+const MODEL = 'google/gemini-2.0-flash-001';
 
 export async function POST(request: NextRequest) {
   try {

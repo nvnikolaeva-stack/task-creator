@@ -431,7 +431,23 @@ export default function Home() {
               </p>
             </div>
           )}
-          <TaskResult task={generatedTask} onCopy={handleCopy} onRegenerate={handleRegenerate} />
+          <TaskResult 
+            task={generatedTask} 
+            onCopy={handleCopy} 
+            onRegenerate={handleRegenerate}
+            selectedTeam={finalTeam || undefined}
+            onTaskUpdate={(updatedTask) => {
+              setGeneratedTask(updatedTask);
+              // Обновляем историю с новой версией задачи
+              if (finalTeam) {
+                const teamName = teams.find(t => t.id === finalTeam.teamId)?.name || finalTeam.teamId;
+                const subtypeName = finalTeam.subtypeId
+                  ? teams.find(t => t.id === finalTeam.teamId)?.subtypes.find(s => s.id === finalTeam.subtypeId)?.name
+                  : undefined;
+                saveTaskToHistory(updatedTask, teamName, subtypeName);
+              }
+            }}
+          />
           <button
             onClick={reset}
             className="w-full px-6 py-3 border border-gray-300 text-text rounded-lg 

@@ -379,3 +379,124 @@ ${template}
   }
 }
 
+// Редактирование задачи
+export async function editTask(
+  currentTask: string,
+  editInstructions: string,
+  currentTeamId: string,
+  currentSubtypeId?: string
+): Promise<{ editedTask: string; newTeamId?: string; newSubtypeId?: string }> {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    throw new Error('API ключ не настроен');
+  }
+
+  const prompt = `Ты помощник по редактированию задач для Jira.
+
+Текущая задача:
+\`\`\`
+${currentTask}
+\`\`\`
+
+Текущая команда: ${currentTeamId}${currentSubtypeId ? ` / ${currentSubtypeId}` : ''}
+
+Инструкция пользователя по редактированию:
+"${editInstructions}"
+
+Возможные типы правок:
+- Добавить информацию в раздел
+- Удалить раздел или пункт
+- Изменить платформу (iOS, Android, Backend, Desktop)
+- Переформулировать текст
+- Изменить команду или тип задачи
+- Исправить опечатки
+- Уточнить критерии приёмки
+- Добавить/убрать метрики
+
+Правила:
+1. Внеси изменения согласно инструкции
+2. Сохрани структуру и форматирование задачи
+3. Если инструкция неясная — постарайся понять намерение и применить
+4. Если нужно изменить команду/тип — укажи новые значения
+
+Ответь в формате JSON:
+{
+  "editedTask": "полный текст отредактированной задачи",
+  "newTeamId": "новый id команды или null если не изменился",
+  "newSubtypeId": "новый id подтипа или null"
+}
+
+Только JSON, без пояснений.`;
+
+  const isServer = typeof window === 'undefined' && apiKey;
+  let response: Response;
+
+  if (isServer) {
+    // Прямой вызов OpenRouter API на сервере
+    console.log('Запрос к OpenRouter API напрямую (editTask)');
+    
+    response = await fetch(OPENROUTER_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'HTTP-Referer': process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000',
+        'X-Title': 'Task Creator',
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 4000,
+      }),
+    });
+  } else {
+    // Через API route на клиенте
+    console.log('Запрос к серверному API route (editTask)');
+    
+    response = await fetch(API_ROUTE, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        action: 'editTask',
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+  }
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ error: 'Не удалось прочитать ответ' }));
+    console.error('API ошибка при редактировании задачи:', {
+      status: response.status,
+      statusText: response.statusText,
+      body: errorData,
+    });
+    throw new Error(`API ошибка: ${response.status} ${response.statusText}. ${errorData.error || errorData.details || 'Неизвестная ошибка'}`);
+  }
+
+  const data = await response.json();
+  const content = data.choices[0]?.message?.content;
+  if (!content) {
+    console.error('Пустой ответ от API при редактировании задачи:', data);
+    throw new Error('Пустой ответ от API');
+  }
+  
+  const jsonMatch = content.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const result = JSON.parse(jsonMatch[0]);
+      return {
+        editedTask: result.editedTask || currentTask,
+        newTeamId: result.newTeamId && result.newTeamId !== 'null' ? result.newTeamId : undefined,
+        newSubtypeId: result.newSubtypeId && result.newSubtypeId !== 'null' ? result.newSubtypeId : undefined,
+      };
+    } catch (parseError) {
+      console.error('Ошибка парсинга JSON при редактировании:', parseError);
+      throw new Error('Не удалось распарсить ответ от API');
+    }
+  }
+  
+  return { editedTask: currentTask };
+}
+
