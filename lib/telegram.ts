@@ -69,50 +69,48 @@ export function detectTeamFromText(text: string): SelectedTeam | null {
   return null;
 }
 
-// Транскрибация голосового сообщения через Groq Whisper API
+// Транскрибация голосового сообщения через Deepgram Nova-2
 async function transcribeVoice(fileId: string, bot: TelegramBot, botToken: string): Promise<string> {
-  console.log('=== Начало транскрибации ===');
+  console.log('=== Транскрибация через Deepgram ===');
   
   const file = await bot.getFile(fileId);
   const fileUrl = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
   
   const audioResponse = await fetch(fileUrl);
   if (!audioResponse.ok) {
-    throw new Error('Не удалось скачать аудио файл');
+    throw new Error('Не удалось скачать аудио');
   }
   
   const audioBuffer = await audioResponse.arrayBuffer();
   
-  const groqKey = process.env.GROQ_API_KEY;
-  if (!groqKey) {
-    throw new Error('GROQ_API_KEY не настроен');
+  const deepgramKey = process.env.DEEPGRAM_API_KEY;
+  if (!deepgramKey) {
+    throw new Error('DEEPGRAM_API_KEY не настроен');
   }
   
-  const formData = new FormData();
-  formData.append('file', new Blob([audioBuffer], { type: 'audio/ogg' }), 'voice.ogg');
-  formData.append('model', 'whisper-large-v3-turbo');
-  formData.append('language', 'ru');
-  // Подсказка с ключевыми словами для лучшего распознавания
-  formData.append('prompt', 'Задача на разработку, дизайн, аналитика, эксперты, UX, поиск, рекомендации. Таска, выгрузка, дашборд, АБ-тест, рисерч, бэкенд, фронтенд, iOS, Android, продавцы, покупатели, Авито, категория.');
+  const response = await fetch(
+    'https://api.deepgram.com/v1/listen?language=ru&model=nova-2&smart_format=true&punctuate=true',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Token ${deepgramKey}`,
+        'Content-Type': 'audio/ogg',
+      },
+      body: audioBuffer,
+    }
+  );
   
-  const whisperResponse = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${groqKey}`,
-    },
-    body: formData,
-  });
-  
-  if (!whisperResponse.ok) {
-    const errorText = await whisperResponse.text();
-    console.error('Ошибка Whisper:', errorText);
+  if (!response.ok) {
+    const error = await response.text();
+    console.error('Ошибка Deepgram:', error);
     throw new Error('Ошибка распознавания речи');
   }
   
-  const result = await whisperResponse.json();
-  console.log('Сырой результат Whisper:', result.text);
+  const result = await response.json();
+  const transcript = result.results?.channels[0]?.alternatives[0]?.transcript || '';
   
-  return result.text;
+  console.log('Результат Deepgram:', transcript);
+  return transcript;
 }
 
 // Постобработка транскрибации через LLM для исправления ошибок и определения команды

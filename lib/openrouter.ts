@@ -5,7 +5,7 @@
 import { getProjectContext } from './projectContext';
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL = 'xiaomi/mimo-v2-flash:free';
+const MODEL = 'google/gemini-2.0-flash-001';
 const API_ROUTE = '/api/openrouter';
 
 const SYSTEM_PROMPT = `Ты — помощник по созданию задач для Jira. Твоя задача — преобразовать описание от пользователя в структурированную задачу по шаблону.
