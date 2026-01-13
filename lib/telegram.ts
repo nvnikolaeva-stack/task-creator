@@ -197,31 +197,39 @@ async function postProcessTranscription(rawText: string): Promise<{ correctedTex
 function parseAnswersFromText(text: string, questionCount: number): string[] {
   const answers: string[] = [];
   
-  // Пробуем разбить по номерам "1.", "2." и т.д.
-  const parts = text.split(/\d+[\.\)]\s*/);
+  // Пробуем разные форматы
   
-  if (parts.length > 1) {
-    // Убираем пустой первый элемент
-    for (let i = 1; i < parts.length && answers.length < questionCount; i++) {
-      const answer = parts[i].trim();
+  // Формат: "1. ответ, 2. ответ" или "первый - ответ, второй - ответ"
+  const numberedPattern = /(?:^|\n|\,)\s*(?:(\d+)[\.\)\:]?\s*[-–—]?\s*|(?:перв\w*|втор\w*|трет\w*|четверт\w*|пят\w*|шест\w*|седьм\w*)\w*\s*[-–—:]\s*)([^,\n]+)/gi;
+  let match;
+  while ((match = numberedPattern.exec(text)) !== null) {
+    const answer = (match[2] || match[1] || '').trim();
+    if (answer && answers.length < questionCount) {
       answers.push(normalizeAnswer(answer));
     }
-  } else {
-    // Пробуем разбить по переносам строк
-    const lines = text.split('\n').filter(l => l.trim());
-    for (const line of lines) {
+  }
+  
+  // Если не получилось по номерам — разбиваем по запятым или точкам
+  if (answers.length === 0) {
+    const parts = text.split(/[,;]|\.\s+/).map(p => p.trim()).filter(p => p.length > 0);
+    for (const part of parts) {
       if (answers.length < questionCount) {
-        answers.push(normalizeAnswer(line.trim()));
+        answers.push(normalizeAnswer(part));
       }
     }
   }
   
-  // Дополняем недостающие ответы
+  // Если всё ещё мало ответов — весь текст как один ответ
+  if (answers.length === 0 && text.trim()) {
+    answers.push(normalizeAnswer(text.trim()));
+  }
+  
+  // Дополняем до нужного количества
   while (answers.length < questionCount) {
     answers.push('[не указано]');
   }
   
-  return answers;
+  return answers.slice(0, questionCount);
 }
 
 // Нормализация ответа (обработка "не знаю" и т.д.)
@@ -244,9 +252,9 @@ export async function handleTextMessage(
   state.isVoiceInput = false; // Текстовый режим
   userState.set(chatId, state);
 
-  // Если ожидается редактирование задачи
+  // Проверка режима редактирования
   if (state.waitingForEdit && state.lastGeneratedTask) {
-    await bot.sendMessage(chatId, '✏️ Редактирую задачу...');
+    await bot.sendMessage(chatId, '✏️ Применяю изменения...');
     
     try {
       const { editTask } = await import('./openrouter');
@@ -259,18 +267,8 @@ export async function handleTextMessage(
       
       state.lastGeneratedTask = result.editedTask;
       state.waitingForEdit = false;
-      
-      // Обновляем команду если изменилась
-      if (result.newTeamId) {
-        state.selectedTeam = {
-          teamId: result.newTeamId,
-          subtypeId: result.newSubtypeId,
-        };
-      }
-      
       userState.set(chatId, state);
       
-      // Отправляем обновлённую задачу
       await bot.sendMessage(chatId, `📋 Обновлённая задача:\n\n\`\`\`\n${result.editedTask}\n\`\`\``, {
         parse_mode: 'Markdown',
         reply_markup: {
@@ -278,16 +276,17 @@ export async function handleTextMessage(
             [
               { text: '📋 Скопировать', callback_data: 'copy_task' },
               { text: '✏️ Редактировать', callback_data: 'edit_task' }
-            ]
+            ],
+            [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
           ]
         }
       });
     } catch (error: any) {
-      console.error('Ошибка редактирования:', error);
-      await bot.sendMessage(chatId, `❌ Ошибка: ${error.message}`);
+      await bot.sendMessage(chatId, `❌ Ошибка редактирования: ${error.message}`);
     }
     return;
   }
+
 
   // Если ожидается ответ на вопрос о команде
   if (state.waitingForTeam) {
@@ -467,35 +466,46 @@ export async function handleVoiceMessage(
     await bot.sendMessage(chatId, `📝 Распознано:\n"${transcribedText}"`);
     
     // ===== ПРОВЕРКА 1: Ожидаются ответы на вопросы =====
-    if (state.waitingForAllAnswers === true) {
-      console.log('>>> Режим: ответы на вопросы');
-      console.log('>>> userText:', state.userText);
-      console.log('>>> selectedTeam:', state.selectedTeam);
-      console.log('>>> questions:', state.questions);
+    if (state.waitingForAllAnswers === true || state.waitingForAnswerConfirmation === true) {
+      console.log('>>> Обработка ответов пользователя на вопросы');
       
-      // Парсим ответы
-      const answers = parseAnswersFromText(transcribedText, state.questions.length);
+      // Парсим ответы пользователя
+      const userAnswers = parseAnswersFromText(transcribedText, state.questions.length);
       
-      // Объединяем вопросы с ответами
+      console.log('Ответы пользователя:', userAnswers);
+      console.log('Предложения LLM:', state.suggestedAnswers?.map((s: any) => s.suggestedAnswer));
+      
+      // ВАЖНО: Используем ответы ПОЛЬЗОВАТЕЛЯ, а не LLM
+      // Если пользователь сказал "не знаю" или "-", только тогда берём предложение LLM
+      const finalAnswers = userAnswers.map((userAnswer, i) => {
+        const skipPhrases = ['не знаю', 'незнаю', 'пропустить', 'пропуск', '-', 'оставить', 'ок', 'да', 'принять'];
+        const isSkipOrAccept = skipPhrases.some(phrase => userAnswer.toLowerCase().trim() === phrase);
+        
+        if (isSkipOrAccept && state.suggestedAnswers?.[i]) {
+          // Пользователь согласился с предложением LLM
+          return state.suggestedAnswers[i].suggestedAnswer;
+        } else if (userAnswer === '[не указано]' || !userAnswer.trim()) {
+          // Пустой ответ — берём предложение LLM
+          return state.suggestedAnswers?.[i]?.suggestedAnswer || '[не указано]';
+        } else {
+          // Пользователь дал свой ответ — ИСПОЛЬЗУЕМ ЕГО
+          return userAnswer;
+        }
+      });
+      
+      console.log('Финальные ответы:', finalAnswers);
+      
       const questionsWithAnswers = state.questions
-        .map((q: string, i: number) => `Вопрос: ${q}\nОтвет: ${answers[i]}`)
+        .map((q: string, i: number) => `${q}: ${finalAnswers[i]}`)
         .join('\n\n');
       
-      await bot.sendMessage(chatId, '⏳ Генерирую задачу с учётом ваших ответов...');
-      
-      // Сбрасываем флаг ДО генерации
+      // Сбрасываем флаги
       state.waitingForAllAnswers = false;
+      state.waitingForAnswerConfirmation = false;
       userState.set(chatId, state);
       
-      // Генерируем задачу с ОРИГИНАЛЬНЫМ текстом и ответами
-      await generateAndSendTask(
-        state.userText,           // Оригинальный текст задачи
-        state.selectedTeam,       // Оригинальная команда
-        questionsWithAnswers,     // Ответы на вопросы
-        chatId,
-        bot,
-        userState
-      );
+      await bot.sendMessage(chatId, '⏳ Генерирую задачу с вашими ответами...');
+      await generateAndSendTask(state.userText, state.selectedTeam, questionsWithAnswers, chatId, bot, userState);
       return;
     }
     
@@ -1078,15 +1088,41 @@ export function handleBotCommands(bot: TelegramBot, userState: Map<number, any>)
       await bot.answerCallbackQuery(query.id);
       return;
     } else if (query.data === 'copy_task' || query.data?.startsWith('copy_')) {
-      await bot.answerCallbackQuery(query.id, { text: 'Задача скопирована в буфер обмена!' });
+      const state = userState.get(chatId) || {};
+      
+      if (state.lastGeneratedTask) {
+        // Отправляем задачу чистым текстом без Markdown для удобного копирования
+        await bot.sendMessage(
+          chatId,
+          '📋 Скопируйте текст ниже:\n\n' + state.lastGeneratedTask,
+          { parse_mode: undefined }  // Без форматирования
+        );
+        await bot.answerCallbackQuery(query.id, { text: '📋 Текст отправлен для копирования' });
+      } else {
+        await bot.answerCallbackQuery(query.id, { text: '❌ Задача не найдена' });
+      }
+      return;
     } else if (query.data === 'edit_task') {
       const state = userState.get(chatId) || {};
+      
+      if (!state.lastGeneratedTask) {
+        await bot.sendMessage(chatId, '❌ Нет задачи для редактирования.');
+        await bot.answerCallbackQuery(query.id);
+        return;
+      }
+      
       state.waitingForEdit = true;
       userState.set(chatId, state);
       
       await bot.sendMessage(
         chatId,
-        '✏️ Опишите изменения голосом или текстом.\n\nПримеры:\n• "Добавь в критерии приёмки пункт про тестирование"\n• "Убери раздел про метрики"\n• "Измени платформу на iOS"\n• "Переформулируй проблему короче"\n• "Измени команду на дизайн"',
+        '✏️ Опишите изменения текстом или голосом:\n\n' +
+        'Примеры:\n' +
+        '• "Добавь в критерии приёмки пункт про тестирование"\n' +
+        '• "Убери раздел про метрики"\n' +
+        '• "Измени платформу на iOS"\n' +
+        '• "Переформулируй проблему короче"\n' +
+        '• "Измени срок на следующий спринт"',
         {
           reply_markup: {
             inline_keyboard: [[
@@ -1095,31 +1131,30 @@ export function handleBotCommands(bot: TelegramBot, userState: Map<number, any>)
           }
         }
       );
-      await bot.answerCallbackQuery(query.id);
+      
+      await bot.answerCallbackQuery(query.id, { text: '✏️ Режим редактирования' });
       return;
     } else if (query.data === 'cancel_edit') {
       const state = userState.get(chatId) || {};
       state.waitingForEdit = false;
       userState.set(chatId, state);
-      await bot.sendMessage(chatId, 'Редактирование отменено.');
+      await bot.sendMessage(chatId, '❌ Редактирование отменено.');
       await bot.answerCallbackQuery(query.id);
       return;
     } else if (query.data === 'new_task') {
-      // Полностью очищаем состояние пользователя
+      // Полностью очищаем состояние
       userState.delete(chatId);
       
       await bot.sendMessage(
         chatId,
-        '🆕 Начинаем новую задачу!\n\nОтправьте описание задачи голосом или текстом.\n\nНачните с названия команды, например:\n"Разработка: нужно добавить..."',
-        {
-          reply_markup: {
-            inline_keyboard: [[
-              { text: '📋 Список команд', callback_data: 'show_teams' }
-            ]]
-          }
-        }
+        '🆕 Готов к новой задаче!\n\n' +
+        '📝 Отправьте описание текстом или голосом.\n\n' +
+        'Начните с названия команды:\n' +
+        '• Разработка\n• Дизайн\n• Аналитика\n• Эксперты\n• UX\n• Поиск\n• Рекомендации\n\n' +
+        'Пример: "Выгрузка для аналитиков: нужно выгрузить данные за 2025 год..."'
       );
-      await bot.answerCallbackQuery(query.id);
+      
+      await bot.answerCallbackQuery(query.id, { text: '✅ Готов к новой задаче' });
       return;
     } else if (query.data === 'show_teams') {
       const teams = loadTemplates();
