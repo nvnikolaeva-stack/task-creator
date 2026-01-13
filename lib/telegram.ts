@@ -313,6 +313,12 @@ export async function handleTextMessage(
     return;
   }
 
+  // Если ожидается подтверждение предложенных ответов (текстовый режим)
+  if (state.waitingForAnswerConfirmation === true) {
+    await processAnswerCorrections(text, chatId, bot, userState);
+    return;
+  }
+
   // Если ожидается ответ на все вопросы (голосовой режим)
   if (state.waitingForAllAnswers) {
     // Парсим ответы из одного сообщения
@@ -321,8 +327,10 @@ export async function handleTextMessage(
     state.waitingForAllAnswers = false;
     userState.set(chatId, state);
     
-    const allAnswers = answers.join('\n\n');
-    await generateAndSendTask(state.userText, state.selectedTeam, allAnswers, chatId, bot, userState);
+    const questionsWithAnswers = state.questions
+      .map((q: string, i: number) => `Вопрос: ${q}\nОтвет: ${answers[i]}`)
+      .join('\n\n');
+    await generateAndSendTask(state.userText, state.selectedTeam, questionsWithAnswers, chatId, bot, userState);
     return;
   }
 
@@ -345,27 +353,50 @@ export async function handleTextMessage(
 
     if (state.currentQuestionIndex < state.questions.length) {
       // Следующий вопрос
-      await bot.sendMessage(
-        chatId,
-        `Вопрос ${state.currentQuestionIndex + 1} из ${state.questions.length}:\n\n${state.questions[state.currentQuestionIndex]}`,
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: '⏭ Пропустить', callback_data: 'skip_question' }],
-              [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
-            ]
+      const nextQuestion = state.questions[state.currentQuestionIndex];
+      const nextSuggestion = state.suggestedAnswers?.[state.currentQuestionIndex];
+      
+      if (nextSuggestion) {
+        await bot.sendMessage(
+          chatId,
+          `Вопрос ${state.currentQuestionIndex + 1} из ${state.questions.length}:\n\n` +
+          `❓ ${nextSuggestion.question}\n\n` +
+          `💡 Предложение: ${nextSuggestion.suggestedAnswer}\n\n` +
+          `Напишите ваш ответ или нажмите "Принять"`,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '✅ Принять', callback_data: 'accept_suggestion' }],
+                [{ text: '⏭ Пропустить', callback_data: 'skip_question' }],
+                [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
+              ]
+            }
           }
-        }
-      );
+        );
+      } else {
+        await bot.sendMessage(
+          chatId,
+          `Вопрос ${state.currentQuestionIndex + 1} из ${state.questions.length}:\n\n${nextQuestion}`,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '⏭ Пропустить', callback_data: 'skip_question' }],
+                [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
+              ]
+            }
+          }
+        );
+      }
       userState.set(chatId, state);
     } else {
       // Все вопросы отвечены
-      const allAnswers = answers.join('\n\n');
+      const questionsWithAnswers = state.questions
+        .map((q: string, i: number) => `Вопрос: ${q}\nОтвет: ${answers[i]}`)
+        .join('\n\n');
       state.waitingForAnswer = false;
-      state.additionalInfo = allAnswers;
       userState.set(chatId, state);
       
-      await generateAndSendTask(state.userText, state.selectedTeam, allAnswers, chatId, bot, userState);
+      await generateAndSendTask(state.userText, state.selectedTeam, questionsWithAnswers, chatId, bot, userState);
     }
     return;
   }
@@ -421,41 +452,55 @@ export async function handleVoiceMessage(
   botToken: string
 ): Promise<void> {
   try {
+    // ВАЖНО: Получаем state В САМОМ НАЧАЛЕ
     const state = userState.get(chatId) || {};
     
     await bot.sendMessage(chatId, '🎤 Распознаю голос...');
     
-    // Транскрибируем
     const transcribedText = await transcribeVoice(fileId, bot, botToken);
     
     if (!transcribedText || transcribedText.trim().length === 0) {
-      await bot.sendMessage(chatId, '❌ Не удалось распознать речь. Попробуйте говорить чётче или отправьте текстом.');
+      await bot.sendMessage(chatId, '❌ Не удалось распознать речь.');
       return;
     }
     
     await bot.sendMessage(chatId, `📝 Распознано:\n"${transcribedText}"`);
     
-    // ВАЖНО: Сначала проверяем, ожидаются ли ответы на вопросы
-    if (state.waitingForAllAnswers && state.questions && state.userText && state.selectedTeam) {
-      // Это ответы на уточняющие вопросы — обрабатываем их
-      console.log('Обрабатываю голосовые ответы на вопросы');
+    // ===== ПРОВЕРКА 1: Ожидаются ответы на вопросы =====
+    if (state.waitingForAllAnswers === true) {
+      console.log('>>> Режим: ответы на вопросы');
+      console.log('>>> userText:', state.userText);
+      console.log('>>> selectedTeam:', state.selectedTeam);
+      console.log('>>> questions:', state.questions);
       
+      // Парсим ответы
       const answers = parseAnswersFromText(transcribedText, state.questions.length);
-      state.waitingForAllAnswers = false;
-      state.answers = answers;
-      userState.set(chatId, state);
       
-      const allAnswers = answers
-        .map((answer, i) => `${state.questions[i]}: ${answer}`)
+      // Объединяем вопросы с ответами
+      const questionsWithAnswers = state.questions
+        .map((q: string, i: number) => `Вопрос: ${q}\nОтвет: ${answers[i]}`)
         .join('\n\n');
       
-      await bot.sendMessage(chatId, '⏳ Генерирую задачу с учётом ответов...');
-      await generateAndSendTask(state.userText, state.selectedTeam, allAnswers, chatId, bot, userState);
+      await bot.sendMessage(chatId, '⏳ Генерирую задачу с учётом ваших ответов...');
+      
+      // Сбрасываем флаг ДО генерации
+      state.waitingForAllAnswers = false;
+      userState.set(chatId, state);
+      
+      // Генерируем задачу с ОРИГИНАЛЬНЫМ текстом и ответами
+      await generateAndSendTask(
+        state.userText,           // Оригинальный текст задачи
+        state.selectedTeam,       // Оригинальная команда
+        questionsWithAnswers,     // Ответы на вопросы
+        chatId,
+        bot,
+        userState
+      );
       return;
     }
     
-    // Проверяем, ожидается ли редактирование
-    if (state.waitingForEdit && state.lastGeneratedTask) {
+    // ===== ПРОВЕРКА 2: Ожидается редактирование =====
+    if (state.waitingForEdit === true && state.lastGeneratedTask) {
       await bot.sendMessage(chatId, '✏️ Редактирую задачу...');
       
       try {
@@ -500,12 +545,21 @@ export async function handleVoiceMessage(
       return;
     }
     
-    // Это новая задача — обрабатываем как обычно
+    // ===== ПРОВЕРКА 3: Ожидается подтверждение предложенных ответов =====
+    if (state.waitingForAnswerConfirmation === true) {
+      console.log('>>> Режим: корректировка предложенных ответов');
+      // Обрабатываем корректировки от пользователя
+      await processAnswerCorrections(transcribedText, chatId, bot, userState);
+      return;
+    }
+    
+    // ===== Это новая задача =====
+    console.log('>>> Режим: новая задача');
     state.isVoiceInput = true;
     state.userText = transcribedText;
     userState.set(chatId, state);
     
-    // Определяем команду
+    // Определяем команду и обрабатываем
     let detectedTeam = detectTeamFromText(transcribedText);
     
     if (!detectedTeam) {
@@ -523,28 +577,21 @@ export async function handleVoiceMessage(
       await processTask(transcribedText, detectedTeam, chatId, bot, userState);
     } else {
       const teams = loadTemplates();
-      await bot.sendMessage(
-        chatId,
-        '❓ Не удалось определить команду. Выберите:',
-        {
-          reply_markup: {
-            inline_keyboard: [
-              ...teams.map(team => [{
-                text: team.name,
-                callback_data: `team_${team.id}`
-              }]),
-              [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
-            ]
-          }
+      await bot.sendMessage(chatId, '❓ Не удалось определить команду. Выберите:', {
+        reply_markup: {
+          inline_keyboard: [
+            ...teams.map(team => [{ text: team.name, callback_data: `team_${team.id}` }]),
+            [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
+          ]
         }
-      );
+      });
       state.waitingForTeam = true;
       userState.set(chatId, state);
     }
     
   } catch (error: any) {
     console.error('Ошибка обработки голоса:', error);
-    await bot.sendMessage(chatId, `❌ Ошибка: ${error.message}\n\nПопробуйте отправить текстом.`);
+    await bot.sendMessage(chatId, `❌ Ошибка: ${error.message}\n\nПопробуйте текстом.`);
   }
 }
 
@@ -566,7 +613,7 @@ export async function processTask(
     
     await bot.sendMessage(
       chatId,
-      `✅ Команда определена: ${teamName}${subtypeName ? ` - ${subtypeName}` : ''}\n\n⏳ Генерирую задачу...`
+      `✅ Команда: ${teamName}${subtypeName ? ` - ${subtypeName}` : ''}\n\n⏳ Анализирую задачу...`
     );
 
     const template = getTemplate(team.teamId, team.subtypeId);
@@ -574,29 +621,38 @@ export async function processTask(
       throw new Error('Шаблон не найден');
     }
 
-    // Проверяем достаточность информации
     const checkResult = await checkInformationAndAskQuestions(text, template);
     
     if (!checkResult.sufficient && checkResult.questions && checkResult.questions.length > 0) {
-      // Нужны уточняющие вопросы
       const state = userState.get(chatId) || {};
-      
-      // Определяем режим ввода (голос или текст)
       const isVoiceMode = state.isVoiceInput === true;
       
+      // ВАЖНО: Генерируем предложенные ответы
+      await bot.sendMessage(chatId, '🤔 Анализирую описание и готовлю предложения...');
+      
+      const { generateSuggestedAnswers } = await import('./openrouter');
+      const suggestedAnswers = await generateSuggestedAnswers(text, template, checkResult.questions);
+      
+      console.log('Предложенные ответы:', suggestedAnswers);
+      
+      // Формируем сообщение с вопросами И предложениями
+      const questionsWithSuggestions = suggestedAnswers
+        .map((item, i) => `${i + 1}. ${item.question}\n   💡 *Предложение:* ${item.suggestedAnswer}`)
+        .join('\n\n');
+      
       if (isVoiceMode) {
-        // Голосовой режим — все вопросы сразу
-        const questionsList = checkResult.questions
-          .map((q, i) => `${i + 1}. ${q}`)
-          .join('\n');
-        
         await bot.sendMessage(
           chatId,
-          `📝 Нужны уточнения (${checkResult.questions.length} вопросов):\n\n${questionsList}\n\n🎤 Запишите голосовое сообщение с ответами на все вопросы по порядку.\n\nИли напишите "не знаю" / "-" для пунктов, которые неизвестны.`,
+          `📝 Нужны уточнения (${checkResult.questions.length} вопросов):\n\n${questionsWithSuggestions}\n\n` +
+          `━━━━━━━━━━━━━━━━━━━━━\n` +
+          `✅ Нажмите "Принять всё" если предложения подходят\n` +
+          `🎤 Или запишите голосовое с корректировками`,
           {
+            parse_mode: 'Markdown',
             reply_markup: {
               inline_keyboard: [
-                [{ text: '⏭ Пропустить все вопросы', callback_data: 'skip_all_questions' }],
+                [{ text: '✅ Принять все предложения', callback_data: 'accept_all_suggestions' }],
+                [{ text: '⏭ Пропустить все', callback_data: 'skip_all_questions' }],
                 [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
               ]
             }
@@ -604,33 +660,39 @@ export async function processTask(
         );
         
         state.waitingForAllAnswers = true;
-        state.questions = checkResult.questions;
-        state.userText = text;
-        state.selectedTeam = team;
-        userState.set(chatId, state);
+        state.waitingForAnswerConfirmation = true;
       } else {
-        // Текстовый режим — по одному вопросу
-        state.waitingForAnswer = true;
-        state.currentQuestionIndex = 0;
-        state.questions = checkResult.questions;
-        state.answers = [];
-        state.userText = text;
-        state.selectedTeam = team;
-        userState.set(chatId, state);
-
+        // Текстовый режим — первый вопрос с предложением
         await bot.sendMessage(
           chatId,
-          `Нужны уточнения (${checkResult.questions.length} вопросов):\n\nВопрос 1 из ${checkResult.questions.length}:\n\n${checkResult.questions[0]}`,
+          `Вопрос 1 из ${checkResult.questions.length}:\n\n` +
+          `❓ ${suggestedAnswers[0].question}\n\n` +
+          `💡 *Предложение:* ${suggestedAnswers[0].suggestedAnswer}\n\n` +
+          `Напишите ваш ответ или нажмите "Принять"`,
           {
+            parse_mode: 'Markdown',
             reply_markup: {
               inline_keyboard: [
+                [{ text: '✅ Принять', callback_data: 'accept_suggestion' }],
                 [{ text: '⏭ Пропустить', callback_data: 'skip_question' }],
                 [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
               ]
             }
           }
         );
+        
+        state.waitingForAnswer = true;
+        state.currentQuestionIndex = 0;
       }
+      
+      // Сохраняем всё в state
+      state.questions = checkResult.questions;
+      state.suggestedAnswers = suggestedAnswers;
+      state.answers = [];
+      state.userText = text;
+      state.selectedTeam = team;
+      userState.set(chatId, state);
+      
     } else {
       // Информации достаточно
       await generateAndSendTask(text, team, undefined, chatId, bot, userState);
@@ -706,6 +768,86 @@ async function generateAndSendTask(
   } catch (error: any) {
     console.error('Ошибка генерации задачи:', error);
     await bot.sendMessage(chatId, `Ошибка генерации задачи: ${error.message || 'Неизвестная ошибка'}`);
+  }
+}
+
+// Обработка корректировок предложенных ответов
+async function processAnswerCorrections(
+  corrections: string,
+  chatId: number,
+  bot: TelegramBot,
+  userState: Map<number, any>
+): Promise<void> {
+  const state = userState.get(chatId) || {};
+  
+  if (!state.suggestedAnswers || !state.questions) {
+    await bot.sendMessage(chatId, 'Ошибка: не найдены предложенные ответы.');
+    return;
+  }
+  
+  // Используем LLM для понимания корректировок
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  
+  const prompt = `Пользователь корректирует предложенные ответы на вопросы.
+
+Вопросы и предложенные ответы:
+${state.suggestedAnswers.map((item: any, i: number) => `${i + 1}. ${item.question}\n   Предложение: ${item.suggestedAnswer}`).join('\n\n')}
+
+Корректировки от пользователя:
+"${corrections}"
+
+Интерпретируй корректировки и верни финальные ответы.
+- "оставить" / "ок" / "да" / "принять" — оставить предложенный ответ
+- "изменить на X" / "заменить на X" — использовать X
+- "не знаю" / "пропустить" — использовать "[не указано]"
+
+Ответь ТОЛЬКО в JSON:
+{
+  "finalAnswers": ["ответ 1", "ответ 2", ...]
+}`;
+
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'HTTP-Referer': 'https://task-creator.vercel.app',
+        'X-Title': 'Task Creator',
+      },
+      body: JSON.stringify({
+        model: 'google/gemini-2.0-flash-001',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 1000,
+      }),
+    });
+
+    const data = await response.json();
+    const content = data.choices[0]?.message?.content || '';
+    
+    let finalAnswers = state.suggestedAnswers.map((item: any) => item.suggestedAnswer);
+    
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const result = JSON.parse(jsonMatch[0]);
+      if (result.finalAnswers) {
+        finalAnswers = result.finalAnswers;
+      }
+    }
+    
+    const questionsWithAnswers = state.questions
+      .map((q: string, i: number) => `Вопрос: ${q}\nОтвет: ${finalAnswers[i]}`)
+      .join('\n\n');
+    
+    state.waitingForAnswerConfirmation = false;
+    userState.set(chatId, state);
+    
+    await bot.sendMessage(chatId, '⏳ Генерирую задачу с вашими корректировками...');
+    await generateAndSendTask(state.userText, state.selectedTeam, questionsWithAnswers, chatId, bot, userState);
+    
+  } catch (error) {
+    console.error('Ошибка обработки корректировок:', error);
+    await bot.sendMessage(chatId, 'Ошибка обработки. Попробуйте нажать "Принять все предложения" или "Новая задача".');
   }
 }
 
@@ -820,12 +962,92 @@ export function handleBotCommands(bot: TelegramBot, userState: Map<number, any>)
         state.currentQuestionIndex++;
         
         if (state.currentQuestionIndex < state.questions.length) {
+          const nextQuestion = state.questions[state.currentQuestionIndex];
+          const nextSuggestion = state.suggestedAnswers?.[state.currentQuestionIndex];
+          
+          if (nextSuggestion) {
+            await bot.sendMessage(
+              chatId,
+              `Вопрос ${state.currentQuestionIndex + 1} из ${state.questions.length}:\n\n` +
+              `❓ ${nextSuggestion.question}\n\n` +
+              `💡 *Предложение:* ${nextSuggestion.suggestedAnswer}\n\n` +
+              `Напишите ваш ответ или нажмите "Принять"`,
+              {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: '✅ Принять', callback_data: 'accept_suggestion' }],
+                    [{ text: '⏭ Пропустить', callback_data: 'skip_question' }],
+                    [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
+                  ]
+                }
+              }
+            );
+          } else {
+            await bot.sendMessage(
+              chatId,
+              `Вопрос ${state.currentQuestionIndex + 1} из ${state.questions.length}:\n\n${nextQuestion}`,
+              {
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: '⏭ Пропустить', callback_data: 'skip_question' }],
+                    [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
+                  ]
+                }
+              }
+            );
+          }
+        } else {
+          state.waitingForAnswer = false;
+          const questionsWithAnswers = state.questions
+            .map((q: string, i: number) => `Вопрос: ${q}\nОтвет: ${answers[i]}`)
+            .join('\n\n');
+          await generateAndSendTask(state.userText, state.selectedTeam, questionsWithAnswers, chatId, bot, userState);
+        }
+        userState.set(chatId, state);
+      }
+      await bot.answerCallbackQuery(query.id);
+      return;
+    } else if (query.data === 'accept_all_suggestions') {
+      const state = userState.get(chatId) || {};
+      
+      if (state.suggestedAnswers && state.userText && state.selectedTeam) {
+        const answers = state.suggestedAnswers.map((item: any) => item.suggestedAnswer);
+        const questionsWithAnswers = state.questions
+          .map((q: string, i: number) => `Вопрос: ${q}\nОтвет: ${answers[i]}`)
+          .join('\n\n');
+        
+        state.waitingForAnswerConfirmation = false;
+        state.waitingForAllAnswers = false;
+        userState.set(chatId, state);
+        
+        await bot.sendMessage(chatId, '⏳ Генерирую задачу с принятыми ответами...');
+        await generateAndSendTask(state.userText, state.selectedTeam, questionsWithAnswers, chatId, bot, userState);
+      }
+      await bot.answerCallbackQuery(query.id);
+      return;
+    } else if (query.data === 'accept_suggestion') {
+      const state = userState.get(chatId) || {};
+      
+      if (state.waitingForAnswer && state.currentQuestionIndex !== undefined && state.suggestedAnswers) {
+        const answers = state.answers || [];
+        answers[state.currentQuestionIndex] = state.suggestedAnswers[state.currentQuestionIndex].suggestedAnswer;
+        state.answers = answers;
+        state.currentQuestionIndex++;
+        
+        if (state.currentQuestionIndex < state.questions.length) {
+          const nextSuggestion = state.suggestedAnswers[state.currentQuestionIndex];
           await bot.sendMessage(
             chatId,
-            `Вопрос ${state.currentQuestionIndex + 1} из ${state.questions.length}:\n\n${state.questions[state.currentQuestionIndex]}`,
+            `Вопрос ${state.currentQuestionIndex + 1} из ${state.questions.length}:\n\n` +
+            `❓ ${nextSuggestion.question}\n\n` +
+            `💡 *Предложение:* ${nextSuggestion.suggestedAnswer}\n\n` +
+            `Напишите ваш ответ или нажмите "Принять"`,
             {
+              parse_mode: 'Markdown',
               reply_markup: {
                 inline_keyboard: [
+                  [{ text: '✅ Принять', callback_data: 'accept_suggestion' }],
                   [{ text: '⏭ Пропустить', callback_data: 'skip_question' }],
                   [{ text: '🆕 Новая задача', callback_data: 'new_task' }]
                 ]
@@ -834,8 +1056,10 @@ export function handleBotCommands(bot: TelegramBot, userState: Map<number, any>)
           );
         } else {
           state.waitingForAnswer = false;
-          const allAnswers = answers.join('\n\n');
-          await generateAndSendTask(state.userText, state.selectedTeam, allAnswers, chatId, bot, userState);
+          const questionsWithAnswers = state.questions
+            .map((q: string, i: number) => `Вопрос: ${q}\nОтвет: ${answers[i]}`)
+            .join('\n\n');
+          await generateAndSendTask(state.userText, state.selectedTeam, questionsWithAnswers, chatId, bot, userState);
         }
         userState.set(chatId, state);
       }
@@ -845,8 +1069,12 @@ export function handleBotCommands(bot: TelegramBot, userState: Map<number, any>)
       // Пропустить все вопросы (голосовой режим)
       const state = userState.get(chatId) || {};
       state.waitingForAllAnswers = false;
+      state.waitingForAnswerConfirmation = false;
       const answers = state.questions.map(() => '[не указано]');
-      await generateAndSendTask(state.userText, state.selectedTeam, answers.join('\n\n'), chatId, bot, userState);
+      const questionsWithAnswers = state.questions
+        .map((q: string, i: number) => `Вопрос: ${q}\nОтвет: ${answers[i]}`)
+        .join('\n\n');
+      await generateAndSendTask(state.userText, state.selectedTeam, questionsWithAnswers, chatId, bot, userState);
       await bot.answerCallbackQuery(query.id);
       return;
     } else if (query.data === 'copy_task' || query.data?.startsWith('copy_')) {

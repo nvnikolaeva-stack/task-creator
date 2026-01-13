@@ -500,3 +500,115 @@ ${currentTask}
   return { editedTask: currentTask };
 }
 
+// Генерация предложенных ответов на вопросы
+export async function generateSuggestedAnswers(
+  userText: string,
+  template: string,
+  questions: string[]
+): Promise<{ question: string; suggestedAnswer: string }[]> {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  
+  if (!apiKey) {
+    console.error('API ключ не найден для generateSuggestedAnswers');
+    return questions.map(q => ({ question: q, suggestedAnswer: '[не удалось предложить]' }));
+  }
+
+  console.log('=== Генерация предложенных ответов ===');
+  console.log('Текст пользователя:', userText.substring(0, 100) + '...');
+  console.log('Количество вопросов:', questions.length);
+
+  const prompt = `Ты помощник по созданию задач. Проанализируй описание задачи и предложи ответы на вопросы.
+
+ОПИСАНИЕ ЗАДАЧИ ОТ ПОЛЬЗОВАТЕЛЯ:
+"${userText}"
+
+ВОПРОСЫ ДЛЯ УТОЧНЕНИЯ:
+${questions.map((q, i) => `${i + 1}. ${q}`).join('\n')}
+
+ИНСТРУКЦИИ:
+1. Внимательно прочитай описание задачи
+2. Найди в описании информацию для ответов на вопросы
+3. Если информация есть — используй её дословно
+4. Если информации нет, но можно предположить — предложи разумный вариант
+5. Если совсем непонятно — напиши "[требует уточнения]"
+
+ПРИМЕРЫ ИЗВЛЕЧЕНИЯ:
+- Если пользователь сказал "за 2025 год" → срок/период: "2025 год"
+- Если пользователь сказал "Android, iOS и десктоп" → платформы: "Android, iOS, Desktop"
+- Если пользователь сказал "разбивка по месяцам" → формат: "помесячная разбивка"
+- Если пользователь сказал "для анализа влияния продуктовых изменений" → цель: "анализ влияния продуктовых изменений"
+
+Ответь СТРОГО в формате JSON без дополнительного текста:
+{
+  "answers": [
+    { "question": "вопрос 1", "suggestedAnswer": "ответ на основе описания" },
+    { "question": "вопрос 2", "suggestedAnswer": "ответ на основе описания" }
+  ]
+}`;
+
+  const isServer = typeof window === 'undefined' && apiKey;
+  let response: Response;
+
+  if (isServer) {
+    // Прямой вызов OpenRouter API на сервере
+    console.log('Запрос к OpenRouter API напрямую (generateSuggestedAnswers)');
+    
+    response = await fetch(OPENROUTER_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'HTTP-Referer': process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000',
+        'X-Title': 'Task Creator',
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 2000,
+        temperature: 0.3,
+      }),
+    });
+  } else {
+    // Через API route на клиенте
+    console.log('Запрос к серверному API route (generateSuggestedAnswers)');
+    
+    response = await fetch(API_ROUTE, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        action: 'generateSuggestedAnswers',
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+  }
+
+  try {
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Ошибка API generateSuggestedAnswers:', response.status, errorText);
+      return questions.map(q => ({ question: q, suggestedAnswer: '[ошибка API]' }));
+    }
+
+    const data = await response.json();
+    const content = data.choices[0]?.message?.content || '';
+    
+    console.log('Ответ LLM (сырой):', content.substring(0, 500));
+    
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const result = JSON.parse(jsonMatch[0]);
+      console.log('Распарсенные ответы:', result.answers);
+      return result.answers || questions.map(q => ({ question: q, suggestedAnswer: '[не распарсилось]' }));
+    }
+    
+    console.error('Не удалось найти JSON в ответе');
+    return questions.map(q => ({ question: q, suggestedAnswer: '[не удалось распарсить]' }));
+    
+  } catch (error) {
+    console.error('Ошибка generateSuggestedAnswers:', error);
+    return questions.map(q => ({ question: q, suggestedAnswer: '[ошибка]' }));
+  }
+}
+
