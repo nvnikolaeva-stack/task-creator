@@ -451,45 +451,62 @@ export async function handleVoiceMessage(
   botToken: string
 ): Promise<void> {
   try {
-    // ВАЖНО: Получаем state В САМОМ НАЧАЛЕ
+    // Получаем state СРАЗУ
     const state = userState.get(chatId) || {};
     
+    // Показываем статус "печатает"
+    await bot.sendChatAction(chatId, 'typing');
     await bot.sendMessage(chatId, '🎤 Распознаю голос...');
     
     const transcribedText = await transcribeVoice(fileId, bot, botToken);
     
-    if (!transcribedText || transcribedText.trim().length === 0) {
+    if (!transcribedText?.trim()) {
       await bot.sendMessage(chatId, '❌ Не удалось распознать речь.');
       return;
     }
     
     await bot.sendMessage(chatId, `📝 Распознано:\n"${transcribedText}"`);
     
-    // ===== ПРОВЕРКА 1: Ожидаются ответы на вопросы =====
-    if (state.waitingForAllAnswers === true || state.waitingForAnswerConfirmation === true) {
-      console.log('>>> Обработка ответов пользователя на вопросы');
+    // ======= ПРОВЕРКА 1: ОТВЕТЫ НА ВОПРОСЫ =======
+    // Эта проверка ДОЛЖНА быть ПЕРВОЙ!
+    console.log('>>> Проверка состояния:', {
+      waitingForAllAnswers: state.waitingForAllAnswers,
+      waitingForAnswerConfirmation: state.waitingForAnswerConfirmation,
+      hasQuestions: !!state.questions,
+      hasUserText: !!state.userText,
+      hasSelectedTeam: !!state.selectedTeam
+    });
+    
+    if ((state.waitingForAllAnswers === true || state.waitingForAnswerConfirmation === true) && 
+        state.questions && state.userText && state.selectedTeam) {
+      
+      console.log('>>> РЕЖИМ: Ответы на уточняющие вопросы');
+      await bot.sendChatAction(chatId, 'typing');
       
       // Парсим ответы пользователя
       const userAnswers = parseAnswersFromText(transcribedText, state.questions.length);
-      
       console.log('Ответы пользователя:', userAnswers);
-      console.log('Предложения LLM:', state.suggestedAnswers?.map((s: any) => s.suggestedAnswer));
       
-      // ВАЖНО: Используем ответы ПОЛЬЗОВАТЕЛЯ, а не LLM
-      // Если пользователь сказал "не знаю" или "-", только тогда берём предложение LLM
-      const finalAnswers = userAnswers.map((userAnswer, i) => {
-        const skipPhrases = ['не знаю', 'незнаю', 'пропустить', 'пропуск', '-', 'оставить', 'ок', 'да', 'принять'];
-        const isSkipOrAccept = skipPhrases.some(phrase => userAnswer.toLowerCase().trim() === phrase);
+      // Объединяем: если пользователь сказал "ок/да/принять" — берём предложение LLM
+      // Иначе — используем ответ пользователя
+      const finalAnswers = userAnswers.map((userAnswer: string, i: number) => {
+        const acceptPhrases = ['ок', 'да', 'принять', 'оставить', 'согласен', 'норм', 'подходит'];
+        const skipPhrases = ['не знаю', 'незнаю', 'пропустить', '-', 'пропуск'];
         
-        if (isSkipOrAccept && state.suggestedAnswers?.[i]) {
-          // Пользователь согласился с предложением LLM
-          return state.suggestedAnswers[i].suggestedAnswer;
-        } else if (userAnswer === '[не указано]' || !userAnswer.trim()) {
-          // Пустой ответ — берём предложение LLM
-          return state.suggestedAnswers?.[i]?.suggestedAnswer || '[не указано]';
-        } else {
+        const lowerAnswer = userAnswer.toLowerCase().trim();
+        
+        if (acceptPhrases.some(p => lowerAnswer === p || lowerAnswer.startsWith(p))) {
+          // Пользователь принял предложение LLM
+          return state.suggestedAnswers?.[i]?.suggestedAnswer || userAnswer;
+        } else if (skipPhrases.some(p => lowerAnswer === p)) {
+          // Пропуск
+          return '[не указано]';
+        } else if (userAnswer && userAnswer !== '[не указано]') {
           // Пользователь дал свой ответ — ИСПОЛЬЗУЕМ ЕГО
           return userAnswer;
+        } else {
+          // Пустой ответ — берём предложение LLM
+          return state.suggestedAnswers?.[i]?.suggestedAnswer || '[не указано]';
         }
       });
       
@@ -505,12 +522,24 @@ export async function handleVoiceMessage(
       userState.set(chatId, state);
       
       await bot.sendMessage(chatId, '⏳ Генерирую задачу с вашими ответами...');
-      await generateAndSendTask(state.userText, state.selectedTeam, questionsWithAnswers, chatId, bot, userState);
+      await bot.sendChatAction(chatId, 'typing');
+      
+      // Генерируем задачу с ОРИГИНАЛЬНЫМ текстом и ответами
+      await generateAndSendTask(
+        state.userText,
+        state.selectedTeam,
+        questionsWithAnswers,
+        chatId,
+        bot,
+        userState
+      );
       return;
     }
     
-    // ===== ПРОВЕРКА 2: Ожидается редактирование =====
+    // ======= ПРОВЕРКА 2: РЕЖИМ РЕДАКТИРОВАНИЯ =======
     if (state.waitingForEdit === true && state.lastGeneratedTask) {
+      console.log('>>> РЕЖИМ: Редактирование задачи');
+      await bot.sendChatAction(chatId, 'typing');
       await bot.sendMessage(chatId, '✏️ Редактирую задачу...');
       
       try {
@@ -563,8 +592,9 @@ export async function handleVoiceMessage(
       return;
     }
     
-    // ===== Это новая задача =====
-    console.log('>>> Режим: новая задача');
+    // ======= РЕЖИМ: НОВАЯ ЗАДАЧА =======
+    console.log('>>> РЕЖИМ: Новая задача');
+    await bot.sendChatAction(chatId, 'typing');
     state.isVoiceInput = true;
     state.userText = transcribedText;
     userState.set(chatId, state);
@@ -614,6 +644,9 @@ export async function processTask(
   userState: Map<number, any>
 ): Promise<void> {
   try {
+    // Показываем "печатает"
+    await bot.sendChatAction(chatId, 'typing');
+    
     const teams = loadTemplates();
     const teamObj = teams.find(t => t.id === team.teamId);
     const teamName = teamObj?.name || team.teamId;
@@ -631,6 +664,8 @@ export async function processTask(
       throw new Error('Шаблон не найден');
     }
 
+    // Перед вызовом LLM снова показываем
+    await bot.sendChatAction(chatId, 'typing');
     const checkResult = await checkInformationAndAskQuestions(text, template);
     
     if (!checkResult.sufficient && checkResult.questions && checkResult.questions.length > 0) {
@@ -638,9 +673,11 @@ export async function processTask(
       const isVoiceMode = state.isVoiceInput === true;
       
       // ВАЖНО: Генерируем предложенные ответы
+      await bot.sendChatAction(chatId, 'typing');
       await bot.sendMessage(chatId, '🤔 Анализирую описание и готовлю предложения...');
       
       const { generateSuggestedAnswers } = await import('./openrouter');
+      await bot.sendChatAction(chatId, 'typing');
       const suggestedAnswers = await generateSuggestedAnswers(text, template, checkResult.questions);
       
       console.log('Предложенные ответы:', suggestedAnswers);
@@ -714,7 +751,7 @@ export async function processTask(
 }
 
 // Генерация и отправка задачи
-async function generateAndSendTask(
+export async function generateAndSendTask(
   text: string,
   team: SelectedTeam,
   additionalInfo: string | undefined,
@@ -723,6 +760,9 @@ async function generateAndSendTask(
   userState: Map<number, any>
 ): Promise<void> {
   try {
+    // Показываем "печатает"
+    await bot.sendChatAction(chatId, 'typing');
+    
     const template = getTemplate(team.teamId, team.subtypeId);
     if (!template) {
       throw new Error('Шаблон не найден');
